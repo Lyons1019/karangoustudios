@@ -14,6 +14,7 @@ const prisma = new PrismaClient();
 /**
  * Service de gestion des vidéos pour Karangou Studios
  * Gère le streaming adaptatif et la protection du contenu
+ * FONCTIONNALITÉ CORE: Ce service est essentiel pour la plateforme VOD-CROWDFUNDING
  */
 class VideoService {
   constructor() {

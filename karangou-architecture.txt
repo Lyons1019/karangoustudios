@@ -1,8 +1,13 @@
 # Architecture technique et plan de développement - Karangou Studios
 
-## 1. Architecture globale
+## 1. Vue d'ensemble de la plateforme
 
-### 1.1 Architecture technique
+Karangou Studios est une plateforme **VOD-CROWDFUNDING** dont la mission fondamentale est de permettre :
+1. Le visionnage gratuit de films africains
+2. Le financement participatif de nouveaux projets cinématographiques
+3. L'association entre les films existants et les nouveaux projets à financer
+
+### 1.1 Architecture technique globale
 
 ```
 ┌─────────────────────────────────────────────────────────────────────┐
@@ -11,10 +16,14 @@
 │  │ Interface    │  │ Gestionnaire │  │ Lecteur vidéo │  │ PWA    │  │
 │  │ utilisateur  │  │ d'état (Redux)│  │ personnalisé  │  │        │  │
 │  └──────────────┘  └──────────────┘  └───────────────┘  └────────┘  │
-│  ┌──────────────┐  ┌──────────────┐  ┌───────────────┐              │
-│  │ Module Chat  │  │ Module Appel │  │ Interface     │              │
-│  │ en temps réel│  │ Vidéo WebRTC │  │ publicitaire  │              │
-│  └──────────────┘  └──────────────┘  └───────────────┘              │
+│                                                                     │
+│  ┌─────────────────────────────┐  ┌─────────────────────────────┐  │
+│  │  MODULES PRINCIPAUX         │  │  MODULES COMPLÉMENTAIRES    │  │
+│  │  • Catalogue de films       │  │  • Chat en temps réel       │  │
+│  │  • Lecteur VOD adaptatif    │  │  • Appels vidéo            │  │
+│  │  • Projets de financement   │  │  • Filtres vidéo           │  │
+│  │  • Système de paiement      │  │  • Interface publicitaire  │  │
+│  └─────────────────────────────┘  └─────────────────────────────┘  │
 └───────────┬─────────────────────────────────────────────────────────┘
             │
             │ API RESTful / GraphQL / WebSocket
@@ -25,25 +34,29 @@
 │  │ API Gateway  │  │ Services     │  │ Système       │  │ Jobs   │  │
 │  │              │  │ métiers      │  │ d'auth        │  │ planifiés│  │
 │  └──────────────┘  └──────────────┘  └───────────────┘  └────────┘  │
-│  ┌──────────────┐  ┌──────────────┐  ┌───────────────┐  ┌────────┐  │
-│  │ Service Chat │  │ Service      │  │ Service       │  │ Service │  │
-│  │ WebSocket    │  │ Appels Vidéo │  │ Équipes Film  │  │ Pub     │  │
-│  └──────────────┘  └──────────────┘  └───────────────┘  └────────┘  │
-└───────────┬─────────────────────────────────┬───────────────────────┘
-            │                                 │
-            ▼                                 ▼
+│                                                                     │
+│  ┌─────────────────────────────┐  ┌─────────────────────────────┐  │
+│  │  SERVICES PRINCIPAUX        │  │  SERVICES COMPLÉMENTAIRES   │  │
+│  │  • Service VOD              │  │  • Service Chat             │  │
+│  │  • Service Projet           │  │  • Service Appels Vidéo     │  │
+│  │  • Service Paiement         │  │  • Service Équipes Film     │  │
+│  │  • Service Analytics        │  │  • Service Publicité        │  │
+│  └─────────────────────────────┘  └─────────────────────────────┘  │
+└───────────┬─────────────────────────────┬───────────────────────────┘
+            │                             │
+            ▼                             ▼
 ┌─────────────────────────┐  ┌─────────────────────────────────────────┐
 │      Base de données    │  │          Services externes               │
-│  ┌──────────────────┐   │  │  ┌──────────┐  ┌────────────────────┐   │
-│  │ PostgreSQL       │   │  │  │ CDN      │  │ Passerelles de     │   │
-│  │ (données         │   │  │  │ vidéo    │  │ paiement           │   │
-│  │ relationnelles)  │   │  │  │          │  │ (Mobile money, etc)│   │
-│  └──────────────────┘   │  │  └──────────┘  └────────────────────┘   │
-│                         │  │  ┌──────────┐  ┌────────────────────┐   │
-│                         │  │  │ Serveurs │  │ Serveurs TURN/STUN │   │
-│                         │  │  │ médias   │  │ (WebRTC)           │   │
-│                         │  │  └──────────┘  └────────────────────┘   │
-└─────────────────────────┘  └─────────────────────────────────────────┘
+│  ┌──────────────────┐   │  │  ┌──────────────┐  ┌────────────────────┐   │
+│  │ PostgreSQL       │   │  │  │ CDN vidéo    │  │ Passerelles de     │   │
+│  │ (données         │   │  │  │ (primaire)   │  │ paiement           │   │
+│  │ relationnelles)  │   │  │  │              │  │ (Mobile money, etc)│   │
+│  └──────────────────┘   │  │  └──────────────┘  └────────────────────┘   │
+│                         │  │  ┌──────────────┐  ┌────────────────────┐   │
+│                         │  │  │ Serveurs     │  │ Serveurs TURN/STUN │   │
+│                         │  │  │ médias       │  │ (secondaire)       │   │
+│                         │  │  └──────────────┘  └────────────────────┘   │
+└─────────────────────────┘  └─────────────────────────────────────────────┘
 ```
 
 ### 1.2 Stack technologique recommandée
@@ -57,7 +70,6 @@
 - **PWA**: Service workers pour expérience hors ligne limitée
 - **Communication temps réel**: Socket.io ou client WebSocket
 - **Appels vidéo**: WebRTC avec adaptateur pour les environnements à faible bande passante
-- **Affichage publicitaire**: Module personnalisé avec suivi des impressions et clics
 
 #### Backend
 - **Framework**: Node.js avec Express ou NestJS
@@ -66,7 +78,7 @@
 - **Authentification**: JWT avec OAuth2 multi-provider
 - **Base de données**: PostgreSQL
 - **ORM**: Prisma ou TypeORM
-- **Serveur WebRTC**: MediaSoup ou Janus
+- **Streaming vidéo**: Service personnalisé avec qualité adaptative
 - **Tests**: Jest, Supertest
 
 #### Infrastructure
@@ -75,11 +87,11 @@
 - **CI/CD**: GitHub Actions ou GitLab CI
 - **Monitoring**: Sentry, PM2, Prometheus
 - **Caching**: Redis pour optimiser les performances
-- **Serveurs TURN/STUN**: coturn, adaptés aux contraintes réseau africaines
+- **Serveurs TURN/STUN**: coturn (pour les fonctionnalités d'appel vidéo)
 
 ## 2. Modèle de données
 
-### 2.1 Principales entités
+### 2.1 Entités principales du cœur de métier
 
 ```
 ┌───────────────┐       ┌───────────────┐       ┌───────────────┐
@@ -108,7 +120,11 @@
 │ statut        │       │ terminé       │       └───────────────┘
 │ transaction_id│       └───────────────┘
 └───────────────┘
+```
 
+### 2.2 Entités des fonctionnalités complémentaires
+
+```
 ┌───────────────┐       ┌───────────────┐       ┌───────────────┐
 │ MembreEquipe  │       │ ChatMessage   │       │ AppelVideo    │
 ├───────────────┤       ├───────────────┤       ├───────────────┤
@@ -117,41 +133,23 @@
 │ utilisateur_id│       │ utilisateur_id│       │ membre_id     │
 │ role          │       │ contenu       │       │ film_id       │
 │ date_ajout    │       │ date          │       │ duree         │
-└───────────────┘       │ est_système   │       │ cout          │
-                        └───────────────┘       │ statut        │
+└───────────────┘       └───────────────┘       │ cout          │
                                                 └───────────────┘
 
 ┌───────────────┐       ┌───────────────┐       ┌───────────────┐
-│  Campagne     │       │ Publicité     │       │ Impression    │
+│  Campagne     │       │ Publicité     │       │ VideoFilter   │
 ├───────────────┤       ├───────────────┤       ├───────────────┤
 │ id            │       │ id            │       │ id            │
-│ annonceur_id  │◄──────┤ campagne_id   │◄──────┤ publicite_id  │
-│ nom           │       │ titre         │       │ date          │
-│ date_debut    │       │ emplacement   │       │ contexte      │
-│ date_fin      │       │ format        │       └───────────────┘
-│ budget        │       │ url_cible     │       
-│ statut        │       │ nb_impressions│       
-└───────────────┘       │ nb_clics      │       
-                        └───────────────┘       
+│ annonceur_id  │◄──────┤ campagne_id   │       │ nom           │
+│ nom           │       │ titre         │       │ categorie     │
+│ date_debut    │       │ emplacement   │       │ parametres    │
+│ date_fin      │       │ format        │       │ url_asset     │
+└───────────────┘       └───────────────┘       └───────────────┘
 ```
 
-### 2.2 Relations clés
+## 3. Plan de développement par fonctionnalités
 
-- Un **Utilisateur** peut être un spectateur, un réalisateur, un acteur ou une maison de production
-- Un **Film** est associé à un ou plusieurs **Projets** à financer
-- Un **Projet** contient des **Documents** (synopsis, fiche technique, préaffiche, etc.)
-- Un **Utilisateur** fait des **Contributions** à des **Projets**
-- Un **Utilisateur** a un historique de **Visionnages** de **Films**
-- Un **Film** a plusieurs **MembresEquipe** (acteurs, techniciens)
-- Un **Film** a plusieurs **ChatMessages** pour les discussions en temps réel
-- Un **Utilisateur** peut initier des **AppelsVideo** avec des **MembresEquipe**
-- Un **Annonceur** (Utilisateur) peut créer des **Campagnes** publicitaires
-- Une **Campagne** contient plusieurs **Publicités**
-- Les **Publicités** sont suivies via des **Impressions** et des **Clics**
-
-## 3. Fonctionnalités détaillées et étapes de développement
-
-### 3.1 Phase 1: Fonctionnalités de base (2-3 mois)
+### 3.1 Phase 1: Fonctionnalités essentielles de VOD-CROWDFUNDING (1-2 mois)
 
 #### Authentification et gestion des utilisateurs
 - Inscription et connexion sécurisées
@@ -160,21 +158,21 @@
 - Récupération de mot de passe
 - Tableaux de bord personnalisés selon le type d'utilisateur
 
-#### Catalogue de films et système de visionnage
+#### Catalogue de films et système de visionnage (CŒUR DE MÉTIER)
 - Catalogue de films avec filtres avancés
 - Système de streaming adaptatif (différentes qualités selon la connexion)
 - Système de favoris et listes personnalisées
 - Historique de visionnage
 - Système de notation et commentaires
 
-#### Système de financement participatif
+#### Système de financement participatif (CŒUR DE MÉTIER)
 - Création et soumission de projets de films
 - Système de validation des projets par l'administration
 - Intégration des passerelles de paiement (cartes bancaires, mobile money)
 - Tableaux de bord de suivi des financements
 - Système de notification des contributeurs
 
-### 3.2 Phase 2: Fonctionnalités sociales et équipes (2 mois)
+### 3.2 Phase 2: Fonctionnalités d'engagement et interaction (2 mois)
 
 #### Gestion des équipes de film
 - Invitation des membres d'équipe via liens personnalisés
@@ -225,13 +223,13 @@
 
 ## 4. Intégrations spécifiques pour le marché africain
 
-### 4.1 Systèmes de paiement
+### 4.1 Systèmes de paiement (CRITIQUE)
 - **Mobile Money**: MTN Mobile Money, Flooz, Moov Money (essentiels au Togo)
 - **Cartes bancaires**: Intégration via Stripe ou solution régionale
 - **Portefeuilles numériques**: Intégration PayPal et solutions locales
 - **Paiements offline**: Génération de codes QR pour paiements en agence
 
-### 4.2 Optimisation pour environnement à faible connectivité
+### 4.2 Optimisation pour environnement à faible connectivité (CRITIQUE)
 - Préchargement intelligent des films
 - Réduction de qualité automatique selon la bande passante
 - Mode hors ligne pour certaines fonctionnalités
