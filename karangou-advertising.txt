@@ -1,0 +1,832 @@
+// Fichier: server/services/advertising/index.js
+
+const { PrismaClient } = require('@prisma/client');
+const prisma = new PrismaClient();
+
+/**
+ * Service de gestion publicitaire pour Karangou Studios
+ * Gère l'affichage et le suivi des publicités sur la plateforme
+ */
+class AdvertisingService {
+  constructor() {
+    // Emplacements publicitaires disponibles
+    this.adPlacements = {
+      HOME_BANNER: 'home_banner',         // Bannière en haut de la page d'accueil
+      HOME_SIDEBAR: 'home_sidebar',       // Encart latéral sur la page d'accueil
+      FILM_BEFORE: 'film_before',         // Publicité avant le film
+      FILM_AFTER: 'film_after',           // Publicité après le film
+      FILM_SIDEBAR: 'film_sidebar',       // Encart latéral sur la page de film
+      PROJECT_SIDEBAR: 'project_sidebar', // Encart latéral sur la page de projet
+      SEARCH_RESULTS: 'search_results'    // Encart dans les résultats de recherche
+    };
+    
+    // Formats publicitaires disponibles
+    this.adFormats = {
+      BANNER: 'banner',       // Bannière horizontale
+      SQUARE: 'square',       // Carré
+      VIDEO: 'video',         // Vidéo
+      TEXT: 'text'            // Texte uniquement
+    };
+    
+    // États possibles d'une campagne publicitaire
+    this.campaignStates = {
+      DRAFT: 'draft',         // En cours de création
+      PENDING: 'pending',     // En attente de validation
+      ACTIVE: 'active',       // Active
+      PAUSED: 'paused',       // Mise en pause
+      COMPLETED: 'completed', // Terminée
+      REJECTED: 'rejected'    // Rejetée
+    };
+  }
+
+  /**
+   * Crée une nouvelle campagne publicitaire
+   * @param {number} advertiserId - ID de l'annonceur
+   * @param {Object} campaignData - Données de la campagne
+   * @returns {Promise<Object>} - Campagne créée
+   */
+  async createCampaign(advertiserId, campaignData) {
+    try {
+      // Vérifier que l'annonceur existe
+      const advertiser = await prisma.user.findUnique({
+        where: { id: advertiserId }
+      });
+      
+      if (!campaign) {
+        throw new Error('Campagne non trouvée');
+      }
+      
+      // Vérifier que la campagne est en attente de validation
+      if (campaign.status !== this.campaignStates.PENDING) {
+        throw new Error('Seules les campagnes en attente peuvent être validées ou rejetées');
+      }
+      
+      // Mettre à jour la campagne
+      const updatedCampaign = await prisma.adCampaign.update({
+        where: { id: campaignId },
+        data: {
+          status: approved ? this.campaignStates.ACTIVE : this.campaignStates.REJECTED,
+          rejectionReason: approved ? null : reason,
+          updatedAt: new Date(),
+          reviewedBy: adminId,
+          reviewedAt: new Date()
+        }
+      });
+      
+      // Si la campagne est approuvée, activer toutes les annonces
+      if (approved) {
+        await prisma.advertisement.updateMany({
+          where: { campaignId },
+          data: {
+            isActive: true,
+            updatedAt: new Date()
+          }
+        });
+      }
+      
+      return {
+        id: updatedCampaign.id,
+        name: updatedCampaign.name,
+        status: updatedCampaign.status,
+        rejectionReason: updatedCampaign.rejectionReason,
+        updatedAt: updatedCampaign.updatedAt,
+        reviewedAt: updatedCampaign.reviewedAt
+      };
+    } catch (error) {
+      console.error('Erreur lors de la validation/rejet de la campagne:', error);
+      throw new Error(`Échec de la validation/rejet de la campagne: ${error.message}`);
+    }
+  }
+
+  /**
+   * Met en pause ou réactive une campagne publicitaire
+   * @param {number} campaignId - ID de la campagne
+   * @param {number} advertiserId - ID de l'annonceur
+   * @param {boolean} pause - Si la campagne doit être mise en pause
+   * @returns {Promise<Object>} - Campagne mise à jour
+   */
+  async toggleCampaignStatus(campaignId, advertiserId, pause) {
+    try {
+      // Vérifier que la campagne existe et appartient à l'annonceur
+      const campaign = await prisma.adCampaign.findFirst({
+        where: {
+          id: campaignId,
+          advertiserId
+        }
+      });
+      
+      if (!campaign) {
+        throw new Error('Campagne non trouvée ou non autorisée');
+      }
+      
+      // Vérifier que la campagne est dans un état qui permet la mise en pause/réactivation
+      if (campaign.status !== this.campaignStates.ACTIVE && campaign.status !== this.campaignStates.PAUSED) {
+        throw new Error('Seules les campagnes actives ou en pause peuvent être modifiées');
+      }
+      
+      // Mettre à jour la campagne
+      const updatedCampaign = await prisma.adCampaign.update({
+        where: { id: campaignId },
+        data: {
+          status: pause ? this.campaignStates.PAUSED : this.campaignStates.ACTIVE,
+          updatedAt: new Date()
+        }
+      });
+      
+      // Mettre à jour l'état des annonces
+      await prisma.advertisement.updateMany({
+        where: { campaignId },
+        data: {
+          isActive: !pause,
+          updatedAt: new Date()
+        }
+      });
+      
+      return {
+        id: updatedCampaign.id,
+        name: updatedCampaign.name,
+        status: updatedCampaign.status,
+        updatedAt: updatedCampaign.updatedAt
+      };
+    } catch (error) {
+      console.error('Erreur lors de la mise à jour du statut de la campagne:', error);
+      throw new Error(`Échec de la mise à jour du statut: ${error.message}`);
+    }
+  }
+
+  /**
+   * Récupère les publicités à afficher pour un emplacement donné
+   * @param {string} placement - Emplacement publicitaire
+   * @param {Object} context - Contexte d'affichage (filmId, etc.)
+   * @returns {Promise<Array>} - Liste des publicités à afficher
+   */
+  async getAdsForPlacement(placement, context = {}) {
+    try {
+      // Vérifier que l'emplacement est valide
+      if (!Object.values(this.adPlacements).includes(placement)) {
+        throw new Error(`Emplacement invalide: ${placement}`);
+      }
+      
+      const now = new Date();
+      
+      // Récupérer les annonces actives pour cet emplacement
+      const ads = await prisma.advertisement.findMany({
+        where: {
+          placement,
+          isActive: true,
+          campaign: {
+            status: this.campaignStates.ACTIVE,
+            startDate: { lte: now },
+            endDate: { gte: now }
+          }
+        },
+        include: {
+          campaign: {
+            select: {
+              id: true,
+              name: true,
+              advertiser: {
+                select: {
+                  id: true,
+                  name: true
+                }
+              }
+            }
+          }
+        },
+        orderBy: [
+          { impressionCount: 'asc' }, // Prioriser les annonces moins vues
+          { campaign: { budget: 'desc' } } // Puis les campagnes avec le plus gros budget
+        ],
+        take: context.limit || 1 // Par défaut, renvoyer une seule annonce
+      });
+      
+      if (ads.length === 0) {
+        return [];
+      }
+      
+      // Incrémenter le compteur d'impressions pour chaque annonce
+      const adIds = ads.map(ad => ad.id);
+      
+      await prisma.advertisement.updateMany({
+        where: {
+          id: { in: adIds }
+        },
+        data: {
+          impressionCount: {
+            increment: 1
+          }
+        }
+      });
+      
+      // Enregistrer les impressions
+      const impressions = adIds.map(adId => ({
+        adId,
+        timestamp: new Date(),
+        placement,
+        context: JSON.stringify(context)
+      }));
+      
+      await prisma.adImpression.createMany({
+        data: impressions
+      });
+      
+      // Formater les annonces pour l'affichage
+      return ads.map(ad => ({
+        id: ad.id,
+        title: ad.title,
+        description: ad.description,
+        format: ad.format,
+        content: ad.content,
+        imageUrl: ad.imageUrl,
+        videoUrl: ad.videoUrl,
+        targetUrl: ad.targetUrl,
+        advertiser: ad.campaign.advertiser.name,
+        campaignId: ad.campaignId,
+        impressionTracking: `/api/ads/${ad.id}/impression` // URL pour le pixel de tracking
+      }));
+    } catch (error) {
+      console.error('Erreur lors de la récupération des publicités:', error);
+      // En cas d'erreur, ne pas bloquer l'affichage du contenu principal
+      return [];
+    }
+  }
+
+  /**
+   * Enregistre un clic sur une publicité
+   * @param {number} adId - ID de la publicité
+   * @param {Object} context - Contexte du clic
+   * @returns {Promise<boolean>} - Succès de l'enregistrement
+   */
+  async trackAdClick(adId, context = {}) {
+    try {
+      // Vérifier que la publicité existe
+      const ad = await prisma.advertisement.findUnique({
+        where: { id: adId }
+      });
+      
+      if (!ad) {
+        throw new Error('Publicité non trouvée');
+      }
+      
+      // Incrémenter le compteur de clics
+      await prisma.advertisement.update({
+        where: { id: adId },
+        data: {
+          clickCount: {
+            increment: 1
+          }
+        }
+      });
+      
+      // Enregistrer le clic
+      await prisma.adClick.create({
+        data: {
+          adId,
+          timestamp: new Date(),
+          context: JSON.stringify(context)
+        }
+      });
+      
+      return true;
+    } catch (error) {
+      console.error('Erreur lors de l\'enregistrement du clic:', error);
+      return false;
+    }
+  }
+
+  /**
+   * Génère des statistiques pour une campagne publicitaire
+   * @param {number} campaignId - ID de la campagne
+   * @param {number} advertiserId - ID de l'annonceur
+   * @returns {Promise<Object>} - Statistiques de la campagne
+   */
+  async getCampaignStats(campaignId, advertiserId) {
+    try {
+      // Vérifier que la campagne existe et appartient à l'annonceur
+      const campaign = await prisma.adCampaign.findFirst({
+        where: {
+          id: campaignId,
+          advertiserId
+        },
+        include: {
+          advertisements: true
+        }
+      });
+      
+      if (!campaign) {
+        throw new Error('Campagne non trouvée ou non autorisée');
+      }
+      
+      // Récupérer les identifiants des annonces
+      const adIds = campaign.advertisements.map(ad => ad.id);
+      
+      // Récupérer les statistiques globales
+      const [totalImpressions, totalClicks] = await Promise.all([
+        prisma.adImpression.count({
+          where: {
+            adId: { in: adIds }
+          }
+        }),
+        prisma.adClick.count({
+          where: {
+            adId: { in: adIds }
+          }
+        })
+      ]);
+      
+      // Calculer le taux de clics (CTR)
+      const ctr = totalImpressions > 0 ? (totalClicks / totalImpressions) * 100 : 0;
+      
+      // Statistiques par annonce
+      const adStats = await Promise.all(campaign.advertisements.map(async ad => {
+        const [impressions, clicks] = await Promise.all([
+          prisma.adImpression.count({
+            where: { adId: ad.id }
+          }),
+          prisma.adClick.count({
+            where: { adId: ad.id }
+          })
+        ]);
+        
+        return {
+          id: ad.id,
+          title: ad.title,
+          format: ad.format,
+          placement: ad.placement,
+          impressions,
+          clicks,
+          ctr: impressions > 0 ? (clicks / impressions) * 100 : 0
+        };
+      }));
+      
+      // Statistiques par jour
+      const startDate = new Date(campaign.startDate);
+      const endDate = new Date(campaign.endDate);
+      
+      // Limiter à 30 jours pour éviter une requête trop lourde
+      const maxDays = 30;
+      const today = new Date();
+      const actualStartDate = new Date(Math.max(startDate.getTime(), today.getTime() - maxDays * 86400000));
+      
+      const dailyStats = await prisma.$queryRaw`
+        SELECT 
+          DATE_TRUNC('day', ai."timestamp") as day,
+          COUNT(DISTINCT ai.id) as impressions,
+          COUNT(DISTINCT ac.id) as clicks
+        FROM "AdImpression" ai
+        LEFT JOIN "AdClick" ac ON ac."adId" = ai."adId" AND DATE_TRUNC('day', ac.timestamp) = DATE_TRUNC('day', ai.timestamp)
+        WHERE ai."adId" IN (${adIds})
+          AND ai.timestamp >= ${actualStartDate}
+          AND ai.timestamp <= ${today}
+        GROUP BY DATE_TRUNC('day', ai."timestamp")
+        ORDER BY day ASC
+      `;
+      
+      return {
+        campaign: {
+          id: campaign.id,
+          name: campaign.name,
+          status: campaign.status,
+          startDate: campaign.startDate,
+          endDate: campaign.endDate,
+          budget: campaign.budget
+        },
+        overall: {
+          impressions: totalImpressions,
+          clicks: totalClicks,
+          ctr
+        },
+        ads: adStats,
+        daily: dailyStats
+      };
+    } catch (error) {
+      console.error('Erreur lors de la génération des statistiques:', error);
+      throw new Error(`Échec de la génération des statistiques: ${error.message}`);
+    }
+  }
+
+  /**
+   * Récupère toutes les campagnes d'un annonceur
+   * @param {number} advertiserId - ID de l'annonceur
+   * @param {Object} options - Options de pagination et filtrage
+   * @returns {Promise<Object>} - Campagnes paginées
+   */
+  async getAdvertiserCampaigns(advertiserId, { page = 1, limit = 20, status = null }) {
+    try {
+      const skip = (page - 1) * limit;
+      
+      // Construire la condition de filtrage
+      let where = { advertiserId };
+      
+      if (status) {
+        where.status = status;
+      }
+      
+      const [campaigns, total] = await Promise.all([
+        prisma.adCampaign.findMany({
+          where,
+          orderBy: {
+            updatedAt: 'desc'
+          },
+          skip,
+          take: parseInt(limit),
+          include: {
+            _count: {
+              select: {
+                advertisements: true
+              }
+            }
+          }
+        }),
+        prisma.adCampaign.count({ where })
+      ]);
+      
+      // Récupérer des statistiques basiques pour chaque campagne
+      const campaignsWithStats = await Promise.all(campaigns.map(async campaign => {
+        const adIds = await prisma.advertisement.findMany({
+          where: { campaignId: campaign.id },
+          select: { id: true }
+        });
+        
+        const adIdList = adIds.map(ad => ad.id);
+        
+        const [impressions, clicks] = await Promise.all([
+          prisma.adImpression.count({
+            where: {
+              adId: { in: adIdList }
+            }
+          }),
+          prisma.adClick.count({
+            where: {
+              adId: { in: adIdList }
+            }
+          })
+        ]);
+        
+        return {
+          id: campaign.id,
+          name: campaign.name,
+          description: campaign.description,
+          startDate: campaign.startDate,
+          endDate: campaign.endDate,
+          budget: campaign.budget,
+          status: campaign.status,
+          adCount: campaign._count.advertisements,
+          stats: {
+            impressions,
+            clicks,
+            ctr: impressions > 0 ? (clicks / impressions) * 100 : 0
+          },
+          createdAt: campaign.createdAt,
+          updatedAt: campaign.updatedAt
+        };
+      }));
+      
+      return {
+        data: campaignsWithStats,
+        pagination: {
+          total,
+          page: parseInt(page),
+          limit: parseInt(limit),
+          totalPages: Math.ceil(total / limit)
+        }
+      };
+    } catch (error) {
+      console.error('Erreur lors de la récupération des campagnes:', error);
+      throw new Error(`Échec de la récupération des campagnes: ${error.message}`);
+    }
+  }
+
+  /**
+   * Met à jour une annonce publicitaire
+   * @param {number} adId - ID de l'annonce
+   * @param {number} advertiserId - ID de l'annonceur
+   * @param {Object} adData - Nouvelles données de l'annonce
+   * @returns {Promise<Object>} - Annonce mise à jour
+   */
+  async updateAd(adId, advertiserId, adData) {
+    try {
+      // Vérifier que l'annonce existe et appartient à l'annonceur
+      const ad = await prisma.advertisement.findUnique({
+        where: { id: adId },
+        include: {
+          campaign: true
+        }
+      });
+      
+      if (!ad) {
+        throw new Error('Annonce non trouvée');
+      }
+      
+      if (ad.campaign.advertiserId !== advertiserId) {
+        throw new Error('Vous n\'êtes pas autorisé à modifier cette annonce');
+      }
+      
+      // Vérifier que la campagne est en brouillon ou en pause
+      if (ad.campaign.status !== this.campaignStates.DRAFT && ad.campaign.status !== this.campaignStates.PAUSED) {
+        throw new Error('Impossible de modifier une annonce d\'une campagne active ou terminée');
+      }
+      
+      // Valider les données mises à jour
+      if (adData.placement && !Object.values(this.adPlacements).includes(adData.placement)) {
+        throw new Error(`Emplacement invalide. Les emplacements valides sont: ${Object.values(this.adPlacements).join(', ')}`);
+      }
+      
+      if (adData.format && !Object.values(this.adFormats).includes(adData.format)) {
+        throw new Error(`Format invalide. Les formats valides sont: ${Object.values(this.adFormats).join(', ')}`);
+      }
+      
+      // Mettre à jour l'annonce
+      const updatedAd = await prisma.advertisement.update({
+        where: { id: adId },
+        data: {
+          title: adData.title || ad.title,
+          description: adData.description || ad.description,
+          placement: adData.placement || ad.placement,
+          format: adData.format || ad.format,
+          content: adData.content || ad.content,
+          imageUrl: adData.imageUrl || ad.imageUrl,
+          videoUrl: adData.videoUrl || ad.videoUrl,
+          targetUrl: adData.targetUrl || ad.targetUrl,
+          updatedAt: new Date()
+        }
+      });
+      
+      return {
+        id: updatedAd.id,
+        title: updatedAd.title,
+        description: updatedAd.description,
+        placement: updatedAd.placement,
+        format: updatedAd.format,
+        content: updatedAd.content,
+        imageUrl: updatedAd.imageUrl,
+        videoUrl: updatedAd.videoUrl,
+        targetUrl: updatedAd.targetUrl,
+        updatedAt: updatedAd.updatedAt
+      };
+    } catch (error) {
+      console.error('Erreur lors de la mise à jour de l\'annonce:', error);
+      throw new Error(`Échec de la mise à jour de l'annonce: ${error.message}`);
+    }
+  }
+
+  /**
+   * Supprime une annonce publicitaire
+   * @param {number} adId - ID de l'annonce
+   * @param {number} advertiserId - ID de l'annonceur
+   * @returns {Promise<Object>} - Résultat de la suppression
+   */
+  async deleteAd(adId, advertiserId) {
+    try {
+      // Vérifier que l'annonce existe et appartient à l'annonceur
+      const ad = await prisma.advertisement.findUnique({
+        where: { id: adId },
+        include: {
+          campaign: true
+        }
+      });
+      
+      if (!ad) {
+        throw new Error('Annonce non trouvée');
+      }
+      
+      if (ad.campaign.advertiserId !== advertiserId) {
+        throw new Error('Vous n\'êtes pas autorisé à supprimer cette annonce');
+      }
+      
+      // Vérifier que la campagne est en brouillon ou en pause
+      if (ad.campaign.status !== this.campaignStates.DRAFT && ad.campaign.status !== this.campaignStates.PAUSED) {
+        throw new Error('Impossible de supprimer une annonce d\'une campagne active ou terminée');
+      }
+      
+      // Supprimer l'annonce
+      await prisma.advertisement.delete({
+        where: { id: adId }
+      });
+      
+      return {
+        success: true,
+        message: 'Annonce supprimée avec succès'
+      };
+    } catch (error) {
+      console.error('Erreur lors de la suppression de l\'annonce:', error);
+      throw new Error(`Échec de la suppression de l'annonce: ${error.message}`);
+    }
+  }
+}
+
+// Exporter une instance unique du service
+module.exports = new AdvertisingService();advertiser) {
+        throw new Error('Annonceur non trouvé');
+      }
+      
+      // Vérifier que les données de la campagne sont valides
+      if (!campaignData.name || !campaignData.startDate || !campaignData.endDate) {
+        throw new Error('Nom et dates de la campagne requis');
+      }
+      
+      // S'assurer que la date de début est antérieure à la date de fin
+      const startDate = new Date(campaignData.startDate);
+      const endDate = new Date(campaignData.endDate);
+      
+      if (startDate >= endDate) {
+        throw new Error('La date de début doit être antérieure à la date de fin');
+      }
+      
+      // Créer la campagne
+      const campaign = await prisma.adCampaign.create({
+        data: {
+          advertiserId,
+          name: campaignData.name,
+          description: campaignData.description || null,
+          startDate,
+          endDate,
+          budget: campaignData.budget || 0,
+          status: this.campaignStates.DRAFT,
+          createdAt: new Date(),
+          updatedAt: new Date()
+        }
+      });
+      
+      return {
+        id: campaign.id,
+        name: campaign.name,
+        description: campaign.description,
+        startDate: campaign.startDate,
+        endDate: campaign.endDate,
+        budget: campaign.budget,
+        status: campaign.status,
+        createdAt: campaign.createdAt
+      };
+    } catch (error) {
+      console.error('Erreur lors de la création de la campagne publicitaire:', error);
+      throw new Error(`Échec de la création de la campagne: ${error.message}`);
+    }
+  }
+
+  /**
+   * Ajoute une annonce à une campagne publicitaire
+   * @param {number} campaignId - ID de la campagne
+   * @param {number} advertiserId - ID de l'annonceur
+   * @param {Object} adData - Données de l'annonce
+   * @returns {Promise<Object>} - Annonce créée
+   */
+  async createAd(campaignId, advertiserId, adData) {
+    try {
+      // Vérifier que la campagne existe et appartient à l'annonceur
+      const campaign = await prisma.adCampaign.findFirst({
+        where: {
+          id: campaignId,
+          advertiserId
+        }
+      });
+      
+      if (!campaign) {
+        throw new Error('Campagne non trouvée ou non autorisée');
+      }
+      
+      // Vérifier que la campagne est en état de brouillon ou en pause
+      if (campaign.status !== this.campaignStates.DRAFT && campaign.status !== this.campaignStates.PAUSED) {
+        throw new Error('Impossible d\'ajouter une annonce à une campagne active ou terminée');
+      }
+      
+      // Vérifier que les données de l'annonce sont valides
+      if (!adData.title || !adData.placement || !adData.format) {
+        throw new Error('Titre, emplacement et format de l\'annonce requis');
+      }
+      
+      // Vérifier que l'emplacement est valide
+      if (!Object.values(this.adPlacements).includes(adData.placement)) {
+        throw new Error(`Emplacement invalide. Les emplacements valides sont: ${Object.values(this.adPlacements).join(', ')}`);
+      }
+      
+      // Vérifier que le format est valide
+      if (!Object.values(this.adFormats).includes(adData.format)) {
+        throw new Error(`Format invalide. Les formats valides sont: ${Object.values(this.adFormats).join(', ')}`);
+      }
+      
+      // Créer l'annonce
+      const ad = await prisma.advertisement.create({
+        data: {
+          campaignId,
+          title: adData.title,
+          description: adData.description || null,
+          placement: adData.placement,
+          format: adData.format,
+          content: adData.content || null,
+          imageUrl: adData.imageUrl || null,
+          videoUrl: adData.videoUrl || null,
+          targetUrl: adData.targetUrl || null,
+          isActive: false,
+          createdAt: new Date(),
+          updatedAt: new Date()
+        }
+      });
+      
+      return {
+        id: ad.id,
+        campaignId: ad.campaignId,
+        title: ad.title,
+        description: ad.description,
+        placement: ad.placement,
+        format: ad.format,
+        content: ad.content,
+        imageUrl: ad.imageUrl,
+        videoUrl: ad.videoUrl,
+        targetUrl: ad.targetUrl,
+        isActive: ad.isActive,
+        createdAt: ad.createdAt
+      };
+    } catch (error) {
+      console.error('Erreur lors de la création de l\'annonce:', error);
+      throw new Error(`Échec de la création de l'annonce: ${error.message}`);
+    }
+  }
+
+  /**
+   * Soumet une campagne publicitaire pour validation
+   * @param {number} campaignId - ID de la campagne
+   * @param {number} advertiserId - ID de l'annonceur
+   * @returns {Promise<Object>} - Campagne mise à jour
+   */
+  async submitCampaignForReview(campaignId, advertiserId) {
+    try {
+      // Vérifier que la campagne existe et appartient à l'annonceur
+      const campaign = await prisma.adCampaign.findFirst({
+        where: {
+          id: campaignId,
+          advertiserId
+        },
+        include: {
+          advertisements: true
+        }
+      });
+      
+      if (!campaign) {
+        throw new Error('Campagne non trouvée ou non autorisée');
+      }
+      
+      // Vérifier que la campagne est en état de brouillon
+      if (campaign.status !== this.campaignStates.DRAFT) {
+        throw new Error('Seules les campagnes en brouillon peuvent être soumises pour validation');
+      }
+      
+      // Vérifier que la campagne a au moins une annonce
+      if (campaign.advertisements.length === 0) {
+        throw new Error('La campagne doit avoir au moins une annonce');
+      }
+      
+      // Mettre à jour la campagne
+      const updatedCampaign = await prisma.adCampaign.update({
+        where: { id: campaignId },
+        data: {
+          status: this.campaignStates.PENDING,
+          updatedAt: new Date()
+        }
+      });
+      
+      return {
+        id: updatedCampaign.id,
+        name: updatedCampaign.name,
+        description: updatedCampaign.description,
+        startDate: updatedCampaign.startDate,
+        endDate: updatedCampaign.endDate,
+        budget: updatedCampaign.budget,
+        status: updatedCampaign.status,
+        updatedAt: updatedCampaign.updatedAt
+      };
+    } catch (error) {
+      console.error('Erreur lors de la soumission de la campagne:', error);
+      throw new Error(`Échec de la soumission de la campagne: ${error.message}`);
+    }
+  }
+
+  /**
+   * Valide ou rejette une campagne publicitaire
+   * @param {number} campaignId - ID de la campagne
+   * @param {boolean} approved - Si la campagne est approuvée
+   * @param {string} reason - Raison du rejet (si rejetée)
+   * @param {number} adminId - ID de l'administrateur
+   * @returns {Promise<Object>} - Campagne mise à jour
+   */
+  async reviewCampaign(campaignId, approved, reason, adminId) {
+    try {
+      // Vérifier que l'administrateur existe et a les droits
+      const admin = await prisma.user.findFirst({
+        where: {
+          id: adminId,
+          type: 'admin'
+        }
+      });
+      
+      if (!admin) {
+        throw new Error('Administrateur non trouvé ou non autorisé');
+      }
+      
+      // Vérifier que la campagne existe
+      const campaign = await prisma.adCampaign.findUnique({
+        where: { id: campaignId }
+      });
+      
+      if (!

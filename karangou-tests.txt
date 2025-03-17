@@ -1,0 +1,454 @@
+// Fichier: tests/api/films.test.js
+
+const request = require('supertest');
+const app = require('../../server/api');
+const { PrismaClient } = require('@prisma/client');
+const jwt = require('jsonwebtoken');
+const bcrypt = require('bcrypt');
+
+const prisma = new PrismaClient();
+
+// Données de test
+let testUser;
+let testToken;
+let testFilm;
+
+beforeAll(async () => {
+  // Créer un utilisateur de test
+  testUser = await prisma.user.create({
+    data: {
+      name: 'Test User',
+      email: 'test@karangou.com',
+      password: await bcrypt.hash('testpassword123', 10),
+      type: 'viewer',
+      country: 'Togo',
+      isVerified: true,
+      isActive: true
+    }
+  });
+  
+  // Créer un token JWT pour l'utilisateur
+  testToken = jwt.sign(
+    { id: testUser.id, email: testUser.email, type: testUser.type },
+    process.env.JWT_SECRET || 'test-secret',
+    { expiresIn: '1h' }
+  );
+  
+  // Créer un film de test
+  testFilm = await prisma.film.create({
+    data: {
+      title: 'Film de test',
+      description: 'Description du film de test',
+      synopsis: 'Synopsis du film de test',
+      director: 'Directeur Test',
+      duration: 120,
+      releaseDate: new Date(),
+      genres: 'Drame,Comédie',
+      posterUrl: 'https://example.com/poster.jpg',
+      videoUrl: 'https://example.com/video.mp4',
+      viewCount: 0,
+      creatorId: testUser.id
+    }
+  });
+});
+
+afterAll(async () => {
+  // Nettoyer les données de test
+  await prisma.film.delete({ where: { id: testFilm.id } });
+  await prisma.user.delete({ where: { id: testUser.id } });
+  await prisma.$disconnect();
+});
+
+describe('API Films', () => {
+  test('GET /api/films doit renvoyer une liste de films', async () => {
+    const response = await request(app).get('/api/films');
+    
+    expect(response.status).toBe(200);
+    expect(response.body.data).toBeInstanceOf(Array);
+    expect(response.body.pagination).toBeDefined();
+  });
+  
+  test('GET /api/films/:id doit renvoyer les détails d\'un film', async () => {
+    const response = await request(app).get(`/api/films/${testFilm.id}`);
+    
+    expect(response.status).toBe(200);
+    expect(response.body.id).toBe(testFilm.id);
+    expect(response.body.title).toBe(testFilm.title);
+  });
+  
+  test('POST /api/films/:id/viewing doit enregistrer un visionnage', async () => {
+    const response = await request(app)
+      .post(`/api/films/${testFilm.id}/viewing`)
+      .set('Authorization', `Bearer ${testToken}`)
+      .send({
+        progress: 50,
+        completed: false
+      });
+    
+    expect(response.status).toBe(201);
+    expect(response.body.filmId).toBe(testFilm.id);
+    expect(response.body.userId).toBe(testUser.id);
+    expect(response.body.progress).toBe(50);
+    
+    // Vérifier que le compteur de vues du film a été incrémenté
+    const updatedFilm = await prisma.film.findUnique({
+      where: { id: testFilm.id }
+    });
+    
+    expect(updatedFilm.viewCount).toBe(1);
+  });
+  
+  test('POST /api/films/:id/comments doit ajouter un commentaire', async () => {
+    const response = await request(app)
+      .post(`/api/films/${testFilm.id}/comments`)
+      .set('Authorization', `Bearer ${testToken}`)
+      .send({
+        content: 'Commentaire de test',
+        rating: 4
+      });
+    
+    expect(response.status).toBe(201);
+    expect(response.body.filmId).toBe(testFilm.id);
+    expect(response.body.userId).toBe(testUser.id);
+    expect(response.body.content).toBe('Commentaire de test');
+    expect(response.body.rating).toBe(4);
+    
+    // Nettoyer le commentaire créé
+    await prisma.comment.delete({
+      where: { id: response.body.id }
+    });
+  });
+  
+  test('GET /api/films doit filtrer par genre', async () => {
+    const response = await request(app)
+      .get('/api/films')
+      .query({ genre: 'Drame' });
+    
+    expect(response.status).toBe(200);
+    
+    // Vérifier que tous les films retournés ont le genre spécifié
+    response.body.data.forEach(film => {
+      expect(film.genres).toContain('Drame');
+    });
+  });
+  
+  test('GET /api/films sans authentification doit fonctionner', async () => {
+    const response = await request(app).get('/api/films');
+    
+    expect(response.status).toBe(200);
+    expect(response.body.data).toBeInstanceOf(Array);
+  });
+  
+  test('POST /api/films/:id/viewing sans authentification doit échouer', async () => {
+    const response = await request(app)
+      .post(`/api/films/${testFilm.id}/viewing`)
+      .send({
+        progress: 50,
+        completed: false
+      });
+    
+    expect(response.status).toBe(401);
+  });
+});
+
+// Fichier: tests/api/projects.test.js
+
+const request = require('supertest');
+const app = require('../../server/api');
+const { PrismaClient } = require('@prisma/client');
+const jwt = require('jsonwebtoken');
+const bcrypt = require('bcrypt');
+
+const prisma = new PrismaClient();
+
+// Données de test
+let testDirector;
+let testDirectorToken;
+let testViewer;
+let testViewerToken;
+let testProject;
+
+beforeAll(async () => {
+  // Créer un utilisateur réalisateur
+  testDirector = await prisma.user.create({
+    data: {
+      name: 'Test Director',
+      email: 'director@karangou.com',
+      password: await bcrypt.hash('testpassword123', 10),
+      type: 'director',
+      country: 'Togo',
+      isVerified: true,
+      isActive: true
+    }
+  });
+  
+  // Créer un token JWT pour le réalisateur
+  testDirectorToken = jwt.sign(
+    { id: testDirector.id, email: testDirector.email, type: testDirector.type },
+    process.env.JWT_SECRET || 'test-secret',
+    { expiresIn: '1h' }
+  );
+  
+  // Créer un utilisateur spectateur
+  testViewer = await prisma.user.create({
+    data: {
+      name: 'Test Viewer',
+      email: 'viewer@karangou.com',
+      password: await bcrypt.hash('testpassword123', 10),
+      type: 'viewer',
+      country: 'Togo',
+      isVerified: true,
+      isActive: true
+    }
+  });
+  
+  // Créer un token JWT pour le spectateur
+  testViewerToken = jwt.sign(
+    { id: testViewer.id, email: testViewer.email, type: testViewer.type },
+    process.env.JWT_SECRET || 'test-secret',
+    { expiresIn: '1h' }
+  );
+  
+  // Créer un projet de test
+  testProject = await prisma.project.create({
+    data: {
+      title: 'Projet de test',
+      description: 'Description du projet de test',
+      synopsis: 'Synopsis du projet de test',
+      genre: 'Drame',
+      targetAmount: 1000000,
+      currentAmount: 250000,
+      startDate: new Date(),
+      endDate: new Date(Date.now() + 30 * 24 * 60 * 60 * 1000), // +30 jours
+      status: 'active',
+      userId: testDirector.id
+    }
+  });
+});
+
+afterAll(async () => {
+  // Nettoyer les données de test
+  await prisma.project.delete({ where: { id: testProject.id } });
+  await prisma.user.delete({ where: { id: testDirector.id } });
+  await prisma.user.delete({ where: { id: testViewer.id } });
+  await prisma.$disconnect();
+});
+
+describe('API Projets', () => {
+  test('GET /api/projects doit renvoyer une liste de projets', async () => {
+    const response = await request(app).get('/api/projects');
+    
+    expect(response.status).toBe(200);
+    expect(response.body.data).toBeInstanceOf(Array);
+    expect(response.body.pagination).toBeDefined();
+  });
+  
+  test('GET /api/projects/:id doit renvoyer les détails d\'un projet', async () => {
+    const response = await request(app).get(`/api/projects/${testProject.id}`);
+    
+    expect(response.status).toBe(200);
+    expect(response.body.id).toBe(testProject.id);
+    expect(response.body.title).toBe(testProject.title);
+  });
+  
+  test('POST /api/projects doit créer un nouveau projet pour un réalisateur', async () => {
+    const projectData = {
+      title: 'Nouveau projet de test',
+      description: 'Description du nouveau projet',
+      synopsis: 'Synopsis du nouveau projet',
+      genre: 'Comédie',
+      targetAmount: 800000,
+      endDate: new Date(Date.now() + 60 * 24 * 60 * 60 * 1000) // +60 jours
+    };
+    
+    const response = await request(app)
+      .post('/api/projects')
+      .set('Authorization', `Bearer ${testDirectorToken}`)
+      .send(projectData);
+    
+    expect(response.status).toBe(201);
+    expect(response.body.title).toBe(projectData.title);
+    expect(response.body.status).toBe('pending');
+    expect(response.body.userId).toBe(testDirector.id);
+    
+    // Nettoyer le projet créé
+    await prisma.project.delete({
+      where: { id: response.body.id }
+    });
+  });
+  
+  test('POST /api/projects ne doit pas permettre à un spectateur de créer un projet', async () => {
+    const projectData = {
+      title: 'Projet non autorisé',
+      description: 'Description',
+      synopsis: 'Synopsis',
+      genre: 'Action',
+      targetAmount: 500000,
+      endDate: new Date(Date.now() + 30 * 24 * 60 * 60 * 1000)
+    };
+    
+    const response = await request(app)
+      .post('/api/projects')
+      .set('Authorization', `Bearer ${testViewerToken}`)
+      .send(projectData);
+    
+    expect(response.status).toBe(403);
+  });
+  
+  test('POST /api/projects/:id/contributions doit ajouter une contribution', async () => {
+    const contributionData = {
+      amount: 5000,
+      paymentMethod: 'mobile_money',
+      transactionId: 'test-transaction-' + Date.now()
+    };
+    
+    const response = await request(app)
+      .post(`/api/projects/${testProject.id}/contributions`)
+      .set('Authorization', `Bearer ${testViewerToken}`)
+      .send(contributionData);
+    
+    expect(response.status).toBe(201);
+    expect(response.body.projectId).toBe(testProject.id);
+    expect(response.body.userId).toBe(testViewer.id);
+    expect(response.body.amount).toBe(contributionData.amount);
+    
+    // Vérifier que le montant du projet a été mis à jour
+    const updatedProject = await prisma.project.findUnique({
+      where: { id: testProject.id }
+    });
+    
+    expect(updatedProject.currentAmount).toBe(testProject.currentAmount + contributionData.amount);
+    
+    // Nettoyer la contribution créée
+    await prisma.contribution.delete({
+      where: { id: response.body.id }
+    });
+    
+    // Restaurer le montant initial du projet
+    await prisma.project.update({
+      where: { id: testProject.id },
+      data: { currentAmount: testProject.currentAmount }
+    });
+  });
+  
+  test('GET /api/projects doit filtrer par statut', async () => {
+    const response = await request(app)
+      .get('/api/projects')
+      .query({ status: 'active' });
+    
+    expect(response.status).toBe(200);
+    
+    // Vérifier que tous les projets retournés ont le statut spécifié
+    response.body.data.forEach(project => {
+      expect(project.status).toBe('active');
+    });
+  });
+});
+
+// Fichier: tests/api/auth.test.js
+
+const request = require('supertest');
+const app = require('../../server/api');
+const { PrismaClient } = require('@prisma/client');
+const jwt = require('jsonwebtoken');
+const bcrypt = require('bcrypt');
+
+const prisma = new PrismaClient();
+
+describe('API Authentification', () => {
+  let testUser;
+  
+  beforeAll(async () => {
+    // Supprimer l'utilisateur de test s'il existe déjà
+    await prisma.user.deleteMany({
+      where: { email: 'auth-test@karangou.com' }
+    });
+  });
+  
+  afterAll(async () => {
+    // Nettoyer les données de test
+    if (testUser) {
+      await prisma.user.delete({ where: { id: testUser.id } });
+    }
+    
+    await prisma.$disconnect();
+  });
+  
+  test('POST /api/auth/register doit créer un nouvel utilisateur', async () => {
+    const userData = {
+      name: 'Auth Test User',
+      email: 'auth-test@karangou.com',
+      password: 'securepassword123',
+      country: 'Togo'
+    };
+    
+    const response = await request(app)
+      .post('/api/auth/register')
+      .send(userData);
+    
+    expect(response.status).toBe(201);
+    expect(response.body.token).toBeDefined();
+    expect(response.body.user).toBeDefined();
+    expect(response.body.user.email).toBe(userData.email);
+    expect(response.body.user.type).toBe('viewer'); // Type par défaut
+    
+    // Stocker l'utilisateur pour le nettoyage
+    testUser = response.body.user;
+  });
+  
+  test('POST /api/auth/login doit connecter un utilisateur existant', async () => {
+    const loginData = {
+      email: 'auth-test@karangou.com',
+      password: 'securepassword123'
+    };
+    
+    const response = await request(app)
+      .post('/api/auth/login')
+      .send(loginData);
+    
+    expect(response.status).toBe(200);
+    expect(response.body.token).toBeDefined();
+    expect(response.body.user).toBeDefined();
+    expect(response.body.user.email).toBe(loginData.email);
+  });
+  
+  test('POST /api/auth/login doit échouer avec des identifiants incorrects', async () => {
+    const loginData = {
+      email: 'auth-test@karangou.com',
+      password: 'wrongpassword'
+    };
+    
+    const response = await request(app)
+      .post('/api/auth/login')
+      .send(loginData);
+    
+    expect(response.status).toBe(401);
+  });
+  
+  test('GET /api/auth/me doit renvoyer les informations de l\'utilisateur connecté', async () => {
+    // D'abord se connecter pour obtenir un token
+    const loginResponse = await request(app)
+      .post('/api/auth/login')
+      .send({
+        email: 'auth-test@karangou.com',
+        password: 'securepassword123'
+      });
+    
+    const token = loginResponse.body.token;
+    
+    // Utiliser le token pour obtenir les infos utilisateur
+    const response = await request(app)
+      .get('/api/auth/me')
+      .set('Authorization', `Bearer ${token}`);
+    
+    expect(response.status).toBe(200);
+    expect(response.body.id).toBe(testUser.id);
+    expect(response.body.email).toBe(testUser.email);
+  });
+  
+  test('GET /api/auth/me doit échouer sans token', async () => {
+    const response = await request(app).get('/api/auth/me');
+    
+    expect(response.status).toBe(401);
+  });
+});

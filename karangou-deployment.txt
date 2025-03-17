@@ -1,0 +1,970 @@
+# Guide de déploiement - Karangou Studios
+
+Ce document détaille les étapes pour déployer la plateforme Karangou Studios en production, en tenant compte des spécificités du marché africain et particulièrement togolais.
+
+## 1. Préparation de l'environnement
+
+### 1.1 Choix de l'infrastructure
+
+Pour un service optimisé en Afrique de l'Ouest, nous recommandons:
+
+```
+┌───────────────────────────────────────────────┐
+│           Infrastructure recommandée           │
+├───────────────────────┬───────────────────────┤
+│ Environnement         │ Option                │
+├───────────────────────┼───────────────────────┤
+│ Principal             │ VPS chez un hébergeur │
+│                       │ avec présence en      │
+│                       │ Afrique (Ghana ou     │
+│                       │ Nigeria préférable)   │
+├───────────────────────┼───────────────────────┤
+│ CDN                   │ Cloudflare (présence  │
+│                       │ en Afrique)           │
+├───────────────────────┼───────────────────────┤
+│ Base de données       │ PostgreSQL managé ou  │
+│                       │ sur VPS dédié         │
+├───────────────────────┼───────────────────────┤
+│ Stockage vidéo        │ Option hybride:       │
+│                       │ - AWS S3 + CloudFront │
+│                       │ - Stockage local pour │
+│                       │   les fichiers        │
+│                       │   fréquemment accédés │
+└───────────────────────┴───────────────────────┘
+```
+
+### 1.2 Configuration requise
+
+**Serveur principal:**
+- Ubuntu Server 20.04 LTS ou plus récent
+- Minimum 4GB RAM, 2 vCPUs
+- 50GB SSD minimum
+- Connexion réseau stable avec bonnes performances vers l'Afrique de l'Ouest
+
+**Base de données:**
+- PostgreSQL 13.0 ou plus récent
+- 4GB RAM minimum
+- 100GB SSD minimum pour l'expansion future
+
+**Stockage vidéo:**
+- Compte AWS (S3 + CloudFront)
+- Service alternatif avec présence africaine si possible
+
+## 2. Installation et configuration
+
+### 2.1 Mise en place de l'environnement backend
+
+```bash
+# Mise à jour du système
+sudo apt update && sudo apt upgrade -y
+
+# Installation des dépendances
+sudo apt install -y curl git build-essential nginx certbot python3-certbot-nginx ufw
+
+# Installation de Node.js
+curl -fsSL https://deb.nodesource.com/setup_16.x | sudo -E bash -
+sudo apt-get install -y nodejs
+
+# Installation de PM2 (gestionnaire de processus)
+sudo npm install -g pm2
+
+# Installation de PostgreSQL
+sudo apt install -y postgresql postgresql-contrib
+
+# Configuration du pare-feu
+sudo ufw allow 22
+sudo ufw allow 80
+sudo ufw allow 443
+sudo ufw enable
+```
+
+### 2.2 Déploiement de l'application
+
+```bash
+# Cloner le dépôt
+git clone https://github.com/karangou-studios/platform.git
+cd platform
+
+# Installation des dépendances
+npm install
+
+# Configuration des variables d'environnement
+cp .env.example .env
+nano .env
+# Configurer les variables d'environnement appropriées
+
+# Initialisation de la base de données
+npx prisma migrate deploy
+
+# Construction de l'application frontend
+npm run build
+
+# Configuration de PM2
+pm2 start ecosystem.config.js
+pm2 startup
+pm2 save
+```
+
+### 2.3 Configuration de Nginx
+
+```nginx
+# /etc/nginx/sites-available/karangou-studios
+
+server {
+    listen 80;
+    server_name karangou-studios.com www.karangou-studios.com;
+
+    location / {
+        proxy_pass http://localhost:3000;
+        proxy_http_version 1.1;
+        proxy_set_header Upgrade $http_upgrade;
+        proxy_set_header Connection 'upgrade';
+        proxy_set_header Host $host;
+        proxy_cache_bypass $http_upgrade;
+    }
+    
+    location /api {
+        proxy_pass http://localhost:3001;
+        proxy_http_version 1.1;
+        proxy_set_header Upgrade $http_upgrade;
+        proxy_set_header Connection 'upgrade';
+        proxy_set_header Host $host;
+        proxy_cache_bypass $http_upgrade;
+    }
+    
+    # Configuration spécifique pour les fichiers statiques
+    location /static {
+        root /var/www/karangou-studios;
+        expires 30d;
+        add_header Cache-Control "public, max-age=2592000";
+    }
+    
+    # Configuration optimisée pour l'Afrique avec Brotli
+    brotli on;
+    brotli_comp_level 6;
+    brotli_types text/plain text/css application/javascript application/json image/svg+xml;
+}
+```
+
+### 2.4 Configuration SSL avec Certbot
+
+```bash
+sudo ln -s /etc/nginx/sites-available/karangou-studios /etc/nginx/sites-enabled/
+sudo nginx -t
+sudo systemctl restart nginx
+
+# Obtention du certificat SSL
+sudo certbot --nginx -d karangou-studios.com -d www.karangou-studios.com
+```
+
+## 3. Intégration des services de paiement
+
+### 3.1 Mobile Money (MTN Mobile Money, Flooz, Moov Money)
+
+```javascript
+// Exemple d'intégration avec MTN Mobile Money (à adapter selon l'API du fournisseur)
+const mtnMoMoIntegration = async (phoneNumber, amount, reference) => {
+  try {
+    const apiKey = process.env.MTN_API_KEY;
+    const apiSecret = process.env.MTN_API_SECRET;
+    
+    const response = await axios.post(
+      'https://api.mtn.com/collection/v1/requesttopay',
+      {
+        amount,
+        currency: 'XOF',
+        externalId: reference,
+        payer: {
+          partyIdType: 'MSISDN',
+          partyId: phoneNumber
+        },
+        payerMessage: 'Paiement pour Karangou Studios',
+        payeeNote: `Contribution au projet réf: ${reference}`
+      },
+      {
+        headers: {
+          'Authorization': `Bearer ${apiKey}`,
+          'X-Reference-Id': reference,
+          'Content-Type': 'application/json'
+        }
+      }
+    );
+    
+    return {
+      success: true,
+      transactionId: reference,
+      status: 'pending'
+    };
+  } catch (error) {
+    console.error('Erreur MTN Mobile Money:', error);
+    return {
+      success: false,
+      error: error.message
+    };
+  }
+};
+```
+
+### 3.2 Passerelles de paiement par carte bancaire
+
+Pour les paiements par carte, l'intégration avec PayDunya (présent au Togo) est recommandée:
+
+```javascript
+const paydunyaIntegration = async (cardDetails, amount, reference) => {
+  try {
+    const apiKey = process.env.PAYDUNYA_API_KEY;
+    const apiSecret = process.env.PAYDUNYA_API_SECRET;
+    
+    const response = await axios.post(
+      'https://app.paydunya.com/api/v1/checkout-invoice/create',
+      {
+        invoice: {
+          total_amount: amount,
+          items: {
+            item_0: {
+              name: "Contribution Karangou Studios",
+              quantity: 1,
+              unit_price: amount,
+              total_price: amount
+            }
+          },
+          description: `Contribution au projet réf: ${reference}`
+        },
+        store: {
+          name: "Karangou Studios"
+        },
+        actions: {
+          callback_url: `https://karangou-studios.com/api/payments/callback?ref=${reference}`
+        }
+      },
+      {
+        headers: {
+          'PAYDUNYA-MASTER-KEY': apiKey,
+          'PAYDUNYA-PRIVATE-KEY': apiSecret,
+          'Content-Type': 'application/json'
+        }
+      }
+    );
+    
+    return {
+      success: true,
+      checkoutUrl: response.data.response_text,
+      token: response.data.token
+    };
+  } catch (error) {
+    console.error('Erreur PayDunya:', error);
+    return {
+      success: false,
+      error: error.message
+    };
+  }
+};
+```
+
+## 4. Optimisations pour le marché africain
+
+### 4.1 Optimisation de la bande passante
+
+```javascript
+// middleware/bandwidth-optimizer.js
+const bandwidthOptimizer = (req, res, next) => {
+  // Détecter la qualité de connexion (basée sur les en-têtes ou l'IP)
+  const connectionQuality = detectConnectionQuality(req);
+  
+  // Ajouter l'information à la requête pour une utilisation ultérieure
+  req.connectionQuality = connectionQuality;
+  
+  // Pour les requêtes API volumineuses, limiter les données si nécessaire
+  if (req.path.startsWith('/api/films') && connectionQuality === 'low') {
+    req.query.limit = Math.min(req.query.limit || 10, 5);
+  }
+  
+  next();
+};
+
+// Utilisation dans l'API de streaming vidéo
+app.get('/api/films/:id/stream', (req, res) => {
+  const quality = req.connectionQuality === 'low' ? 'low' : 
+                 (req.connectionQuality === 'medium' ? 'medium' : 'high');
+                 
+  const videoUrl = getVideoUrlForQuality(req.params.id, quality);
+  
+  res.json({ videoUrl });
+});
+```
+
+### 4.2 Configuration du streaming adaptatif
+
+```nginx
+# Configuration NGINX pour le streaming adaptatif
+location /videos {
+    mp4;
+    mp4_buffer_size 1m;
+    mp4_max_buffer_size 5m;
+    
+    # Compression vidéo pour les connexions lentes
+    limit_rate_after 10m;  # Commence à limiter après 10Mo
+    limit_rate 512k;       # Limite à 512ko/s pour les grands fichiers
+    
+    # Permettre le visionnage partiel (important pour les connexions instables)
+    mp4_limit_rate on;
+    mp4_limit_rate_after 30s;
+}
+```
+
+### 4.3 PWA (Progressive Web App)
+
+Pour permettre une utilisation hors ligne partielle:
+
+```javascript
+// next.config.js
+const withPWA = require('next-pwa')({
+  dest: 'public',
+  disable: process.env.NODE_ENV === 'development',
+  // Personnalisation pour le contexte africain
+  runtimeCaching: [
+    {
+      urlPattern: /^https:\/\/fonts\.(?:googleapis|gstatic)\.com\/.*/i,
+      handler: 'CacheFirst',
+      options: {
+        cacheName: 'google-fonts',
+        expiration: {
+          maxEntries: 4,
+          maxAgeSeconds: 365 * 24 * 60 * 60 // 1 an
+        }
+      }
+    },
+    {
+      // Films déjà visionnés
+      urlPattern: /\/api\/films\/.*/i,
+      handler: 'StaleWhileRevalidate',
+      options: {
+        cacheName: 'film-data',
+        expiration: {
+          maxEntries: 20,
+          maxAgeSeconds: 7 * 24 * 60 * 60 // 1 semaine
+        }
+      }
+    },
+    {
+      // Images (affiches, vignettes)
+      urlPattern: /\.(?:jpg|jpeg|gif|png|svg|ico|webp)$/i,
+      handler: 'CacheFirst',
+      options: {
+        cacheName: 'images',
+        expiration: {
+          maxEntries: 50,
+          maxAgeSeconds: 30 * 24 * 60 * 60 // 30 jours
+        }
+      }
+    }
+  ]
+});
+
+module.exports = withPWA({
+  // Autres configurations Next.js
+});
+```
+
+## 5. Maintenance et surveillance
+
+### 5.1 Configuration de la surveillance
+
+```javascript
+// Intégration avec Sentry pour la surveillance des erreurs
+// sentry.js
+import * as Sentry from '@sentry/node';
+import { RewriteFrames } from '@sentry/integrations';
+
+export const initSentry = () => {
+  Sentry.init({
+    dsn: process.env.SENTRY_DSN,
+    environment: process.env.NODE_ENV,
+    integrations: [
+      new RewriteFrames({
+        root: global.__dirname,
+      }),
+    ],
+  });
+};
+```
+
+### 5.2 Scripts de sauvegarde
+
+```bash
+#!/bin/bash
+# backup.sh - Script de sauvegarde pour Karangou Studios
+
+# Configuration
+DB_NAME="karangou"
+DB_USER="karangou_user"
+BACKUP_DIR="/var/backups/karangou"
+S3_BUCKET="s3://karangou-backups"
+DATE=$(date +%Y-%m-%d_%H-%M-%S)
+
+# Créer le répertoire de sauvegarde si nécessaire
+mkdir -p $BACKUP_DIR
+
+# Sauvegarde de la base de données
+pg_dump -U $DB_USER $DB_NAME | gzip > $BACKUP_DIR/db_backup_$DATE.gz
+
+# Sauvegarde des fichiers importants
+tar -zcf $BACKUP_DIR/files_backup_$DATE.tar.gz /var/www/karangou-studios/uploads
+
+# Envoyer vers un stockage distant (si AWS CLI est installé)
+if command -v aws &> /dev/null; then
+    aws s3 cp $BACKUP_DIR/db_backup_$DATE.gz $S3_BUCKET/db/
+    aws s3 cp $BACKUP_DIR/files_backup_$DATE.tar.gz $S3_BUCKET/files/
+fi
+
+# Nettoyer les anciennes sauvegardes (garder les 7 derniers jours)
+find $BACKUP_DIR -name "db_backup_*" -type f -mtime +7 -delete
+find $BACKUP_DIR -name "files_backup_*" -type f -mtime +7 -delete
+
+echo "Sauvegarde terminée: $DATE"
+```
+
+### 5.3 Mise en place des alertes
+
+```javascript
+// utils/monitoring.js
+const nodemailer = require('nodemailer');
+const cron = require('node-cron');
+const { exec } = require('child_process');
+
+// Configurer le transporteur d'email
+const transporter = nodemailer.createTransport({
+  host: process.env.SMTP_HOST,
+  port: process.env.SMTP_PORT,
+  secure: true,
+  auth: {
+    user: process.env.SMTP_USER,
+    pass: process.env.SMTP_PASSWORD
+  }
+});
+
+// Vérifier l'espace disque
+const checkDiskSpace = () => {
+  exec('df -h / | tail -1 | awk \'{print $5}\' | sed \'s/%//\'', (error, stdout) => {
+    const diskUsage = parseInt(stdout.trim(), 10);
+    
+    if (diskUsage > 85) {
+      sendAlert(
+        'Alerte espace disque',
+        `L'espace disque atteint ${diskUsage}%. Veuillez libérer de l'espace.`
+      );
+    }
+  });
+};
+
+// Vérifier les performances de la base de données
+const checkDatabasePerformance = async (prisma) => {
+  const startTime = Date.now();
+  
+  try {
+    // Exécuter une requête simple pour mesurer le temps de réponse
+    await prisma.$queryRaw`SELECT 1`;
+    
+    const duration = Date.now() - startTime;
+    
+    if (duration > 200) {
+      sendAlert(
+        'Alerte base de données',
+        `Le temps de réponse de la base de données est lent: ${duration}ms`
+      );
+    }
+  } catch (error) {
+    sendAlert(
+      'Erreur base de données',
+      `La base de données n'est pas accessible: ${error.message}`
+    );
+  }
+};
+
+// Vérifier l'état du service de streaming
+const checkStreamingService = async () => {
+  try {
+    const response = await fetch(process.env.VIDEO_CDN_HEALTH_CHECK_URL);
+    
+    if (!response.ok) {
+      sendAlert(
+        'Alerte service de streaming',
+        `Le service de streaming est indisponible. Statut: ${response.status}`
+      );
+    }
+  } catch (error) {
+    sendAlert(
+      'Erreur service de streaming',
+      `Le service de streaming est inaccessible: ${error.message}`
+    );
+  }
+};
+
+// Envoyer une alerte par email
+const sendAlert = (subject, message) => {
+  const mailOptions = {
+    from: process.env.ALERT_EMAIL_FROM,
+    to: process.env.ALERT_EMAIL_TO,
+    subject: `[KARANGOU ALERTE] ${subject}`,
+    text: message
+  };
+  
+  transporter.sendMail(mailOptions, (error) => {
+    if (error) {
+      console.error('Erreur d\'envoi d\'alerte:', error);
+    }
+  });
+};
+
+// Planifier les vérifications
+const setupMonitoring = (prisma) => {
+  // Vérifier l'espace disque toutes les 6 heures
+  cron.schedule('0 */6 * * *', checkDiskSpace);
+  
+  // Vérifier les performances de la base de données toutes les heures
+  cron.schedule('0 * * * *', () => checkDatabasePerformance(prisma));
+  
+  // Vérifier le service de streaming toutes les 15 minutes
+  cron.schedule('*/15 * * * *', checkStreamingService);
+};
+
+module.exports = { setupMonitoring };
+```
+
+## 6. Sécurité
+
+### 6.1 Protection contre les attaques
+
+```javascript
+// middleware/security.js
+const helmet = require('helmet');
+const rateLimit = require('express-rate-limit');
+const slowDown = require('express-slow-down');
+const cors = require('cors');
+
+const configureSecurityMiddleware = (app) => {
+  // En-têtes de sécurité
+  app.use(helmet({
+    contentSecurityPolicy: {
+      directives: {
+        defaultSrc: ["'self'"],
+        scriptSrc: ["'self'", "'unsafe-inline'", "https://cdnjs.cloudflare.com"],
+        styleSrc: ["'self'", "'unsafe-inline'", "https://fonts.googleapis.com"],
+        fontSrc: ["'self'", "https://fonts.gstatic.com"],
+        imgSrc: ["'self'", "data:", "https://karangou-cdn.com"],
+        mediaSrc: ["'self'", "https://karangou-cdn.com"],
+        connectSrc: ["'self'", "https://api.karangou-studios.com"]
+      }
+    }
+  }));
+  
+  // CORS pour les API
+  app.use('/api', cors({
+    origin: process.env.FRONTEND_URL,
+    methods: ['GET', 'POST', 'PUT', 'DELETE'],
+    allowedHeaders: ['Content-Type', 'Authorization']
+  }));
+  
+  // Limiteur de débit pour les tentatives de connexion
+  const loginLimiter = rateLimit({
+    windowMs: 15 * 60 * 1000, // 15 minutes
+    max: 5, // 5 tentatives par fenêtre
+    message: 'Trop de tentatives de connexion. Veuillez réessayer plus tard.'
+  });
+  app.use('/api/auth/login', loginLimiter);
+  
+  // Ralentisseur pour les requêtes API générales
+  const apiSpeedLimiter = slowDown({
+    windowMs: 1 * 60 * 1000, // 1 minute
+    delayAfter: 100, // Ralentir après 100 requêtes
+    delayMs: 500 // Ajouter 500ms de délai par requête supplémentaire
+  });
+  app.use('/api', apiSpeedLimiter);
+  
+  return app;
+};
+
+module.exports = { configureSecurityMiddleware };
+```
+
+### 6.2 Protection du contenu vidéo
+
+```javascript
+// utils/video-protection.js
+const jwt = require('jsonwebtoken');
+const crypto = require('crypto');
+
+// Générer un jeton signé pour l'accès aux vidéos
+const generateVideoToken = (userId, filmId, expiration = '2h') => {
+  return jwt.sign(
+    { 
+      userId, 
+      filmId,
+      sessionId: crypto.randomBytes(16).toString('hex')
+    },
+    process.env.VIDEO_TOKEN_SECRET,
+    { expiresIn: expiration }
+  );
+};
+
+// Middleware de vérification du jeton vidéo
+const verifyVideoToken = (req, res, next) => {
+  const token = req.query.token;
+  
+  if (!token) {
+    return res.status(401).json({ error: 'Accès non autorisé' });
+  }
+  
+  try {
+    const decoded = jwt.verify(token, process.env.VIDEO_TOKEN_SECRET);
+    
+    // Vérifier que le film demandé correspond à celui du jeton
+    if (parseInt(req.params.id) !== decoded.filmId) {
+      return res.status(403).json({ error: 'Jeton invalide pour ce film' });
+    }
+    
+    req.videoSession = decoded;
+    next();
+  } catch (error) {
+    return res.status(403).json({ error: 'Jeton expiré ou invalide' });
+  }
+};
+
+// Ajouter un filigrane dynamique avec l'ID de session
+const addWatermark = (videoPath, sessionId) => {
+  // Dans un système réel, cela appellerait FFmpeg pour ajouter un filigrane
+  // avec l'ID de session et d'autres informations pour tracer les fuites
+  
+  const watermarkedPath = `${videoPath.replace('.mp4', '')}_${sessionId}.mp4`;
+  
+  // Exemple de commande FFmpeg pour ajouter un filigrane
+  const ffmpegCommand = `
+    ffmpeg -i ${videoPath} -vf "drawtext=text='${sessionId}':x=(w-text_w)/2:y=h-th-10:fontsize=24:fontcolor=white@0.3" 
+    -codec:v libx264 -codec:a copy ${watermarkedPath}
+  `;
+  
+  // Exécuter la commande FFmpeg (simulé)
+  console.log(`Génération d'une vidéo avec filigrane: ${watermarkedPath}`);
+  
+  return watermarkedPath;
+};
+
+module.exports = { generateVideoToken, verifyVideoToken, addWatermark };
+```
+
+## 7. Amélioration continue
+
+### 7.1 Suivi des performances
+
+```javascript
+// utils/analytics.js
+const { PrismaClient } = require('@prisma/client');
+const cron = require('node-cron');
+
+const prisma = new PrismaClient();
+
+// Générer des rapports d'analyse périodiques
+const generatePerformanceReport = async () => {
+  try {
+    // 1. Statistiques des visionnages
+    const viewingStats = await prisma.$queryRaw`
+      SELECT 
+        DATE_TRUNC('day', "createdAt") as day,
+        COUNT(*) as view_count,
+        COUNT(DISTINCT "userId") as unique_viewers
+      FROM "FilmViewing"
+      WHERE "createdAt" > NOW() - INTERVAL '30 days'
+      GROUP BY day
+      ORDER BY day DESC
+    `;
+    
+    // 2. Statistiques des contributions
+    const contributionStats = await prisma.$queryRaw`
+      SELECT 
+        DATE_TRUNC('day', "createdAt") as day,
+        COUNT(*) as contribution_count,
+        SUM(amount) as total_amount
+      FROM "Contribution"
+      WHERE "createdAt" > NOW() - INTERVAL '30 days'
+      GROUP BY day
+      ORDER BY day DESC
+    `;
+    
+    // 3. Films les plus populaires
+    const popularFilms = await prisma.film.findMany({
+      select: {
+        id: true,
+        title: true,
+        viewCount: true,
+        averageRating: true
+      },
+      orderBy: {
+        viewCount: 'desc'
+      },
+      take: 10
+    });
+    
+    // 4. Projets les mieux financés
+    const topProjects = await prisma.project.findMany({
+      select: {
+        id: true,
+        title: true,
+        targetAmount: true,
+        currentAmount: true
+      },
+      where: {
+        status: 'active'
+      },
+      orderBy: {
+        currentAmount: 'desc'
+      },
+      take: 10
+    });
+    
+    // 5. Temps de chargement moyen des pages (simulé - dans un système réel, cela viendrait d'un service de supervision frontend)
+    const loadTimeStats = {
+      homePage: 2.3, // secondes
+      filmPage: 3.1,
+      projectPage: 2.8,
+      checkoutPage: 3.5
+    };
+    
+    // Enregistrer le rapport pour référence future
+    await prisma.performanceReport.create({
+      data: {
+        reportDate: new Date(),
+        viewingStats: JSON.stringify(viewingStats),
+        contributionStats: JSON.stringify(contributionStats),
+        popularFilms: JSON.stringify(popularFilms),
+        topProjects: JSON.stringify(topProjects),
+        loadTimeStats: JSON.stringify(loadTimeStats)
+      }
+    });
+    
+    console.log('Rapport de performance généré avec succès');
+    
+  } catch (error) {
+    console.error('Erreur lors de la génération du rapport de performance:', error);
+  }
+};
+
+// Planifier la génération quotidienne de rapports
+const setupAnalytics = () => {
+  cron.schedule('0 1 * * *', generatePerformanceReport); // Tous les jours à 1h du matin
+};
+
+module.exports = { setupAnalytics, generatePerformanceReport };
+```
+
+### 7.2 Plan d'évolution de la plateforme
+
+## Phase 1 : MVP (Lancement initial)
+
+- Catalogue de films basique
+- Système de visionnage
+- Présentation des projets à financer
+- Système de paiement par mobile money (MTN, Moov)
+- Interface utilisateur simple et responsive
+
+## Phase 2 : Amélioration de l'engagement
+
+- Système de commentaires et évaluation
+- Profils utilisateurs améliorés
+- Recommandations personnalisées
+- Optimisation pour les connexions bas débit
+- Version PWA pour expérience hors ligne
+
+## Phase 3 : Expansion des fonctionnalités
+
+- Communauté en ligne pour cinéastes et spectateurs
+- Système de parrainage entre réalisateurs
+- Outils d'analyse pour les créateurs de contenu
+- Support multilingue (langues locales)
+- Applications mobiles natives iOS/Android
+
+## Phase 4 : Scaling régional
+
+- Expansion vers d'autres pays d'Afrique de l'Ouest
+- Partenariats avec des festivals et événements culturels
+- Place de marché pour professionnels du cinéma
+- Système de formation en ligne pour cinéastes émergents
+
+## 8. Intégration avec l'écosystème local
+
+### 8.1 Partenariats potentiels
+
+- **Festivals de cinéma africains** - FESPACO, Écrans Noirs
+- **Écoles de cinéma** - ESAC (École Supérieure des Arts et de la Communication, Togo)
+- **Télécommunications** - MTN, Moov (promotions de data pour le visionnage)
+- **Institutions culturelles** - Centre Culturel Français, Institut Goethe
+
+### 8.2 Stratégie marketing adaptée
+
+- Campagnes SMS pour atteindre un public plus large
+- Promotions via les réseaux de mobile money
+- Événements de projection dans les centres communautaires
+- Partenariats avec les chaînes de télévision locales
+
+## 9. Documentation pour les utilisateurs
+
+### 9.1 Guide du réalisateur/producteur
+
+```markdown
+# Guide du réalisateur/producteur - Karangou Studios
+
+## Comment soumettre votre projet
+
+1. **Créez un compte réalisateur/producteur**
+   - Rendez-vous sur [karangou-studios.com/inscription](https://karangou-studios.com/inscription)
+   - Sélectionnez "Réalisateur" ou "Producteur" comme type de compte
+   - Complétez votre profil avec vos informations professionnelles
+
+2. **Préparez les documents requis**
+   - Synopsis (1/2 page maximum)
+   - Fiche technique du projet
+   - Préaffiche ou concept visuel
+   - Budget prévisionnel (modèle disponible)
+   - Lien vers un film précédent ou showreel
+
+3. **Soumettez votre projet**
+   - Connectez-vous à votre compte
+   - Cliquez sur "Soumettre un projet" dans votre tableau de bord
+   - Remplissez le formulaire et téléchargez les documents requis
+   - Définissez votre objectif de financement et la durée de la campagne
+
+4. **Processus de validation**
+   - Votre projet sera examiné par notre équipe sous 7 jours
+   - Vous recevrez des commentaires et suggestions si nécessaire
+   - Une fois approuvé, votre projet sera publié sur la plateforme
+
+## Comment maximiser vos chances de financement
+
+1. **Créez un contenu promotionnel attrayant**
+   - Rédigez un synopsis clair et captivant
+   - Présentez une préaffiche professionnelle et distinctive
+   - Préparez une courte vidéo de présentation (1-2 minutes)
+
+2. **Mobilisez votre réseau**
+   - Partagez votre projet sur vos réseaux sociaux
+   - Contactez personnellement vos soutiens potentiels
+   - Organisez un événement de lancement si possible
+
+3. **Communiquez régulièrement**
+   - Publiez des mises à jour sur l'avancement de votre projet
+   - Répondez aux commentaires et questions des contributeurs
+   - Partagez des extraits, des photos de repérage ou de casting
+
+4. **Proposez des contreparties attractives**
+   - Remerciements au générique
+   - Invitations à l'avant-première
+   - Contenus exclusifs ou objets dérivés
+
+## Après le financement
+
+1. **Tenez vos contributeurs informés**
+   - Partagez des mises à jour régulières sur la production
+   - Respectez le calendrier annoncé
+   - Documentez les étapes clés de la réalisation
+
+2. **Livrez les contreparties promises**
+   - Envoyez les contreparties dans les délais prévus
+   - Informez en cas de retard éventuel
+   - Ajoutez une touche personnelle (message, dédicace)
+
+3. **Finalisez votre film**
+   - Soumettez la version finale pour diffusion sur la plateforme
+   - Organisez un événement de présentation si possible
+   - Encouragez les spectateurs à découvrir et financer d'autres projets
+```
+
+### 9.2 Guide du contributeur/spectateur
+
+```markdown
+# Guide du spectateur et contributeur - Karangou Studios
+
+## Comment regarder des films
+
+1. **Créez un compte spectateur**
+   - Rendez-vous sur [karangou-studios.com/inscription](https://karangou-studios.com/inscription)
+   - Inscrivez-vous gratuitement avec votre e-mail ou numéro de téléphone
+
+2. **Explorez le catalogue**
+   - Naviguez par genre, réalisateur ou pays
+   - Découvrez les films les mieux notés
+   - Consultez les recommandations personnalisées
+
+3. **Visionnez gratuitement**
+   - Sélectionnez un film qui vous intéresse
+   - Cliquez sur "Regarder" pour lancer la lecture
+   - Aucun paiement requis pour le visionnage
+
+4. **Partagez votre avis**
+   - Notez le film après l'avoir regardé
+   - Laissez un commentaire constructif
+   - Partagez vos films préférés sur les réseaux sociaux
+
+## Comment contribuer aux projets
+
+1. **Découvrez les projets à financer**
+   - Explorez la section "Projets" du site
+   - Chaque film que vous regardez est associé à un projet à financer
+   - Filtrez par genre, pays ou montant recherché
+
+2. **Choisissez votre mode de contribution**
+   - Mobile Money (MTN, Moov, Flooz)
+   - Carte bancaire
+   - Transfert bancaire pour les montants importants
+
+3. **Effectuez votre contribution**
+   - Sélectionnez le montant de votre choix (pas de minimum)
+   - Complétez la transaction via la méthode choisie
+   - Recevez une confirmation par e-mail ou SMS
+
+4. **Suivez l'évolution du projet**
+   - Recevez des notifications sur l'avancement du financement
+   - Consultez les mises à jour publiées par les créateurs
+   - Participez aux discussions autour du projet
+
+## Avantages des contributeurs
+
+1. **Reconnaissance**
+   - Votre nom au générique du film (selon le montant)
+   - Badge de contributeur sur votre profil
+   - Reconnaissance dans la communauté Karangou
+
+2. **Accès privilégié**
+   - Visionnage en avant-première
+   - Contenus exclusifs sur les coulisses
+   - Invitations à des événements (selon le montant)
+
+3. **Impact culturel**
+   - Participation directe à l'essor du cinéma africain
+   - Soutien aux voix et histoires africaines authentiques
+   - Contribution au développement de l'industrie cinématographique locale
+
+## Comment optimiser votre expérience
+
+1. **Connexion à faible débit**
+   - Activez le mode "Économie de données" dans vos paramètres
+   - Téléchargez les films pour un visionnage hors ligne
+   - Utilisez l'application PWA pour une expérience optimisée
+
+2. **Recommandations personnalisées**
+   - Complétez votre profil avec vos préférences
+   - Notez régulièrement les films que vous regardez
+   - Suivez les réalisateurs et contributeurs qui vous intéressent
+
+3. **Participation communautaire**
+   - Rejoignez les discussions sur les films et projets
+   - Partagez vos découvertes avec d'autres membres
+   - Proposez des suggestions d'amélioration de la plateforme
+```
+
+## 10. Contacts utiles
+
+Pour toute question concernant le déploiement ou la maintenance de la plateforme Karangou Studios, veuillez contacter:
+
+- **Support technique**: tech@karangou-studios.com
+- **Intégration des paiements**: payments@karangou-studios.com
+- **Équipe contenu et curation**: content@karangou-studios.com
+- **Urgences (24/7)**: +228 90 12 34 56

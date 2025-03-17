@@ -1,0 +1,858 @@
+// Fichier: server/services/team/index.js
+
+const { PrismaClient } = require('@prisma/client');
+const crypto = require('crypto');
+const jwt = require('jsonwebtoken');
+const prisma = new PrismaClient();
+
+/**
+ * Service de gestion des équipes de film pour Karangou Studios
+ * Gère l'inscription des membres d'équipe et leur association aux films
+ */
+class TeamService {
+  constructor() {
+    // Durée de validité des invitations (15 jours par défaut)
+    this.invitationExpirationDays = 15;
+    
+    // Rôles possibles pour les membres d'équipe
+    this.teamRoles = [
+      'director',         // Réalisateur
+      'producer',         // Producteur
+      'actor',            // Acteur
+      'cinematographer',  // Directeur de la photographie
+      'sound_engineer',   // Ingénieur du son
+      'editor',           // Monteur
+      'screenwriter',     // Scénariste
+      'music_composer',   // Compositeur de musique
+      'set_designer',     // Décorateur
+      'costume_designer', // Costumier
+      'makeup_artist',    // Maquilleur
+      'special_effects',  // Effets spéciaux
+      'other'             // Autre rôle
+    ];
+  }
+
+  /**
+   * Génère un lien d'invitation pour un membre d'équipe
+   * @param {number} filmId - ID du film
+   * @param {number} creatorId - ID du créateur de l'invitation
+   * @param {string} recipientEmail - Email du destinataire
+   * @param {string} role - Rôle du membre d'équipe
+   * @param {string} name - Nom du membre d'équipe (facultatif)
+   * @returns {Promise<Object>} - Détails de l'invitation
+   */
+  async generateInvitationLink(filmId, creatorId, recipientEmail, role, name = null) {
+    try {
+      // Vérifier que le film existe
+      const film = await prisma.film.findUnique({
+        where: { id: filmId }
+      });
+      
+      if (!film) {
+        throw new Error('Film non trouvé');
+      }
+      
+      // Vérifier que le créateur est bien le créateur du film ou un administrateur
+      const creator = await prisma.user.findUnique({
+        where: { id: creatorId }
+      });
+      
+      if (!creator) {
+        throw new Error('Créateur non trouvé');
+      }
+      
+      if (film.creatorId !== creatorId && creator.type !== 'admin') {
+        throw new Error('Vous n\'êtes pas autorisé à inviter des membres d\'équipe pour ce film');
+      }
+      
+      // Vérifier que le rôle est valide
+      if (!this.teamRoles.includes(role)) {
+        throw new Error(`Rôle invalide. Les rôles valides sont: ${this.teamRoles.join(', ')}`);
+      }
+      
+      // Générer un token unique pour l'invitation
+      const token = crypto.randomBytes(16).toString('hex');
+      
+      // Calculer la date d'expiration
+      const expiresAt = new Date();
+      expiresAt.setDate(expiresAt.getDate() + this.invitationExpirationDays);
+      
+      // Vérifier si une invitation existe déjà pour cet email et ce film
+      const existingInvitation = await prisma.teamInvitation.findFirst({
+        where: {
+          filmId,
+          email: recipientEmail,
+          status: 'pending'
+        }
+      });
+      
+      let invitation;
+      
+      if (existingInvitation) {
+        // Mettre à jour l'invitation existante
+        invitation = await prisma.teamInvitation.update({
+          where: { id: existingInvitation.id },
+          data: {
+            token,
+            role,
+            name,
+            expiresAt,
+            updatedAt: new Date()
+          }
+        });
+      } else {
+        // Créer une nouvelle invitation
+        invitation = await prisma.teamInvitation.create({
+          data: {
+            filmId,
+            creatorId,
+            email: recipientEmail,
+            name,
+            role,
+            token,
+            status: 'pending',
+            expiresAt,
+            createdAt: new Date(),
+            updatedAt: new Date()
+          }
+        });
+      }
+      
+      // Construire le lien d'invitation
+      const invitationLink = `${process.env.FRONTEND_URL}/team/join?token=${token}`;
+      
+      return {
+        invitation: {
+          id: invitation.id,
+          filmId,
+          email: recipientEmail,
+          role,
+          name,
+          status: invitation.status,
+          expiresAt: invitation.expiresAt
+        },
+        invitationLink
+      };
+    } catch (error) {
+      console.error('Erreur lors de la génération du lien d\'invitation:', error);
+      throw new Error(`Échec de la génération de l'invitation: ${error.message}`);
+    }
+  }
+
+  /**
+   * Vérifie et récupère les détails d'une invitation
+   * @param {string} token - Token d'invitation
+   * @returns {Promise<Object>} - Détails de l'invitation
+   */
+  async verifyInvitation(token) {
+    try {
+      // Récupérer l'invitation
+      const invitation = await prisma.teamInvitation.findFirst({
+        where: { token },
+        include: {
+          film: {
+            select: {
+              id: true,
+              title: true,
+              posterUrl: true
+            }
+          },
+          creator: {
+            select: {
+              id: true,
+              name: true
+            }
+          }
+        }
+      });
+      
+      if (!invitation) {
+        throw new Error('Invitation non trouvée');
+      }
+      
+      // Vérifier que l'invitation n'a pas expiré
+      if (invitation.expiresAt < new Date()) {
+        throw new Error('Cette invitation a expiré');
+      }
+      
+      // Vérifier que l'invitation est en attente
+      if (invitation.status !== 'pending') {
+        throw new Error(`Cette invitation a déjà été ${invitation.status}`);
+      }
+      
+      return {
+        invitation: {
+          id: invitation.id,
+          email: invitation.email,
+          name: invitation.name,
+          role: invitation.role,
+          expiresAt: invitation.expiresAt,
+          createdAt: invitation.createdAt
+        },
+        film: invitation.film,
+        creator: invitation.creator
+      };
+    } catch (error) {
+      console.error('Erreur lors de la vérification de l\'invitation:', error);
+      throw new Error(`Échec de la vérification de l'invitation: ${error.message}`);
+    }
+  }
+
+  /**
+   * Accepte une invitation et associe l'utilisateur au film
+   * @param {string} token - Token d'invitation
+   * @param {number} userId - ID de l'utilisateur qui accepte l'invitation
+   * @returns {Promise<Object>} - Détails du membre d'équipe créé
+   */
+  async acceptInvitation(token, userId) {
+    try {
+      // Vérifier l'invitation
+      const invitationData = await this.verifyInvitation(token);
+      const invitation = await prisma.teamInvitation.findFirst({
+        where: { token }
+      });
+      
+      // Vérifier que l'utilisateur existe
+      const user = await prisma.user.findUnique({
+        where: { id: userId }
+      });
+      
+      if (!user) {
+        throw new Error('Utilisateur non trouvé');
+      }
+      
+      // Vérifier que l'email de l'utilisateur correspond à celui de l'invitation
+      if (user.email !== invitation.email) {
+        throw new Error('Cette invitation est destinée à une autre adresse email');
+      }
+      
+      // Vérifier si l'utilisateur est déjà membre de l'équipe
+      const existingMember = await prisma.filmTeamMember.findFirst({
+        where: {
+          filmId: invitation.filmId,
+          userId
+        }
+      });
+      
+      if (existingMember) {
+        throw new Error('Vous êtes déjà membre de l\'équipe de ce film');
+      }
+      
+      // Créer le membre d'équipe
+      const teamMember = await prisma.filmTeamMember.create({
+        data: {
+          filmId: invitation.filmId,
+          userId,
+          role: invitation.role,
+          joinedAt: new Date()
+        }
+      });
+      
+      // Mettre à jour l'invitation
+      await prisma.teamInvitation.update({
+        where: { id: invitation.id },
+        data: {
+          status: 'accepted',
+          acceptedAt: new Date()
+        }
+      });
+      
+      // Si l'utilisateur n'a pas encore de profil de type "cinéaste", le mettre à jour
+      if (user.type === 'viewer') {
+        await prisma.user.update({
+          where: { id: userId },
+          data: {
+            type: invitation.role === 'actor' ? 'actor' : 'filmmaker'
+          }
+        });
+      }
+      
+      return {
+        teamMember: {
+          id: teamMember.id,
+          role: teamMember.role,
+          joinedAt: teamMember.joinedAt
+        },
+        user: {
+          id: user.id,
+          name: user.name,
+          email: user.email
+        },
+        film: invitationData.film
+      };
+    } catch (error) {
+      console.error('Erreur lors de l\'acceptation de l\'invitation:', error);
+      throw new Error(`Échec de l'acceptation de l'invitation: ${error.message}`);
+    }
+  }
+
+  /**
+   * Refuse une invitation
+   * @param {string} token - Token d'invitation
+   * @param {string} reason - Raison du refus (facultatif)
+   * @returns {Promise<Object>} - Détails de l'invitation refusée
+   */
+  async declineInvitation(token, reason = null) {
+    try {
+      // Vérifier l'invitation
+      await this.verifyInvitation(token);
+      
+      const invitation = await prisma.teamInvitation.findFirst({
+        where: { token }
+      });
+      
+      // Mettre à jour l'invitation
+      const updatedInvitation = await prisma.teamInvitation.update({
+        where: { id: invitation.id },
+        data: {
+          status: 'declined',
+          declinedAt: new Date(),
+          declineReason: reason
+        }
+      });
+      
+      return {
+        invitation: {
+          id: updatedInvitation.id,
+          email: updatedInvitation.email,
+          role: updatedInvitation.role,
+          status: updatedInvitation.status,
+          declinedAt: updatedInvitation.declinedAt
+        },
+        filmId: invitation.filmId
+      };
+    } catch (error) {
+      console.error('Erreur lors du refus de l\'invitation:', error);
+      throw new Error(`Échec du refus de l'invitation: ${error.message}`);
+    }
+  }
+
+  /**
+   * Récupère tous les membres d'équipe d'un film
+   * @param {number} filmId - ID du film
+   * @returns {Promise<Array>} - Liste des membres d'équipe
+   */
+  async getFilmTeamMembers(filmId) {
+    try {
+      // Vérifier que le film existe
+      const film = await prisma.film.findUnique({
+        where: { id: filmId },
+        include: {
+          creator: {
+            select: {
+              id: true,
+              name: true,
+              email: true,
+              type: true,
+              profilePictureUrl: true,
+              bio: true
+            }
+          }
+        }
+      });
+      
+      if (!film) {
+        throw new Error('Film non trouvé');
+      }
+      
+      // Récupérer les membres d'équipe
+      const teamMembers = await prisma.filmTeamMember.findMany({
+        where: { filmId },
+        include: {
+          user: {
+            select: {
+              id: true,
+              name: true,
+              email: true,
+              type: true,
+              profilePictureUrl: true,
+              bio: true
+            }
+          }
+        },
+        orderBy: {
+          role: 'asc'
+        }
+      });
+      
+      // Organiser les membres par rôle
+      const membersByRole = {
+        director: [],
+        producer: [],
+        actor: [],
+        cinematographer: [],
+        sound_engineer: [],
+        editor: [],
+        screenwriter: [],
+        music_composer: [],
+        set_designer: [],
+        costume_designer: [],
+        makeup_artist: [],
+        special_effects: [],
+        other: []
+      };
+      
+      // Ajouter le créateur à la liste appropriée
+      if (film.creator.type === 'director' || film.creator.type === 'producer') {
+        membersByRole[film.creator.type].push({
+          id: null, // Pas d'ID de TeamMember car c'est le créateur
+          userId: film.creator.id,
+          role: film.creator.type,
+          isCreator: true,
+          user: film.creator
+        });
+      }
+      
+      // Ajouter les autres membres d'équipe
+      teamMembers.forEach(member => {
+        membersByRole[member.role].push({
+          id: member.id,
+          userId: member.userId,
+          role: member.role,
+          isCreator: false,
+          joinedAt: member.joinedAt,
+          user: member.user
+        });
+      });
+      
+      return {
+        film: {
+          id: film.id,
+          title: film.title
+        },
+        teamMembers: membersByRole
+      };
+    } catch (error) {
+      console.error('Erreur lors de la récupération des membres d\'équipe:', error);
+      throw new Error(`Échec de la récupération des membres d'équipe: ${error.message}`);
+    }
+  }
+
+  /**
+   * Retire un membre de l'équipe d'un film
+   * @param {number} teamMemberId - ID du membre d'équipe
+   * @param {number} requesterId - ID de l'utilisateur qui fait la demande
+   * @returns {Promise<Object>} - Résultat de l'opération
+   */
+  async removeTeamMember(teamMemberId, requesterId) {
+    try {
+      // Récupérer le membre d'équipe
+      const teamMember = await prisma.filmTeamMember.findUnique({
+        where: { id: teamMemberId },
+        include: {
+          film: true
+        }
+      });
+      
+      if (!teamMember) {
+        throw new Error('Membre d\'équipe non trouvé');
+      }
+      
+      // Vérifier que le demandeur est autorisé (créateur du film ou le membre lui-même)
+      if (teamMember.film.creatorId !== requesterId && teamMember.userId !== requesterId) {
+        throw new Error('Vous n\'êtes pas autorisé à retirer ce membre d\'équipe');
+      }
+      
+      // Supprimer le membre d'équipe
+      await prisma.filmTeamMember.delete({
+        where: { id: teamMemberId }
+      });
+      
+      return {
+        success: true,
+        message: 'Membre d\'équipe retiré avec succès',
+        filmId: teamMember.filmId,
+        userId: teamMember.userId
+      };
+    } catch (error) {
+      console.error('Erreur lors du retrait du membre d\'équipe:', error);
+      throw new Error(`Échec du retrait du membre d'équipe: ${error.message}`);
+    }
+  }
+
+  /**
+   * Recherche des membres d'équipe par nom ou rôle
+   * @param {string} query - Terme de recherche
+   * @param {string} role - Rôle à filtrer (facultatif)
+   * @param {Object} options - Options de pagination
+   * @returns {Promise<Object>} - Résultats de recherche paginés
+   */
+  async searchTeamMembers(query, role = null, { page = 1, limit = 20 }) {
+    try {
+      const skip = (page - 1) * limit;
+      
+      // Construire la condition de recherche
+      let where = {
+        OR: [
+          {
+            user: {
+              name: {
+                contains: query,
+                mode: 'insensitive'
+              }
+            }
+          }
+        ]
+      };
+      
+      // Ajouter le filtre de rôle si spécifié
+      if (role) {
+        where.role = role;
+      }
+      
+      const [teamMembers, total] = await Promise.all([
+        prisma.filmTeamMember.findMany({
+          where,
+          skip,
+          take: parseInt(limit),
+          include: {
+            user: {
+              select: {
+                id: true,
+                name: true,
+                email: true,
+                type: true,
+                profilePictureUrl: true,
+                bio: true
+              }
+            },
+            film: {
+              select: {
+                id: true,
+                title: true,
+                posterUrl: true
+              }
+            }
+          },
+          orderBy: {
+            joinedAt: 'desc'
+          }
+        }),
+        prisma.filmTeamMember.count({ where })
+      ]);
+      
+      const formattedResults = teamMembers.map(member => ({
+        id: member.id,
+        userId: member.userId,
+        filmId: member.filmId,
+        role: member.role,
+        joinedAt: member.joinedAt,
+        user: member.user,
+        film: member.film
+      }));
+      
+      return {
+        data: formattedResults,
+        pagination: {
+          total,
+          page: parseInt(page),
+          limit: parseInt(limit),
+          totalPages: Math.ceil(total / limit)
+        }
+      };
+    } catch (error) {
+      console.error('Erreur lors de la recherche des membres d\'équipe:', error);
+      throw new Error(`Échec de la recherche: ${error.message}`);
+    }
+  }
+
+  /**
+   * Trouve tous les films associés à un utilisateur
+   * @param {number} userId - ID de l'utilisateur
+   * @returns {Promise<Array>} - Liste des films associés
+   */
+  async getUserFilms(userId) {
+    try {
+      // Récupérer les films créés par l'utilisateur
+      const createdFilms = await prisma.film.findMany({
+        where: { creatorId: userId },
+        select: {
+          id: true,
+          title: true,
+          posterUrl: true,
+          director: true,
+          releaseDate: true,
+          createdAt: true
+        },
+        orderBy: {
+          createdAt: 'desc'
+        }
+      });
+      
+      // Récupérer les films où l'utilisateur est membre d'équipe
+      const teamFilms = await prisma.filmTeamMember.findMany({
+        where: { userId },
+        include: {
+          film: {
+            select: {
+              id: true,
+              title: true,
+              posterUrl: true,
+              director: true,
+              releaseDate: true,
+              createdAt: true
+            }
+          }
+        },
+        orderBy: {
+          joinedAt: 'desc'
+        }
+      });
+      
+      // Fusionner et formater les résultats
+      const allFilms = [
+        ...createdFilms.map(film => ({
+          id: film.id,
+          title: film.title,
+          posterUrl: film.posterUrl,
+          director: film.director,
+          releaseDate: film.releaseDate,
+          relationship: 'creator'
+        })),
+        ...teamFilms.map(membership => ({
+          id: membership.film.id,
+          title: membership.film.title,
+          posterUrl: membership.film.posterUrl,
+          director: membership.film.director,
+          releaseDate: membership.film.releaseDate,
+          relationship: membership.role
+        }))
+      ];
+      
+      // Éliminer les doublons (si l'utilisateur est à la fois créateur et membre d'équipe)
+      const uniqueFilms = allFilms.filter((film, index, self) =>
+        index === self.findIndex(f => f.id === film.id)
+      );
+      
+      return uniqueFilms;
+    } catch (error) {
+      console.error('Erreur lors de la récupération des films de l\'utilisateur:', error);
+      throw new Error(`Échec de la récupération des films: ${error.message}`);
+    }
+  }
+
+  /**
+   * Met à jour les informations d'un membre d'équipe
+   * @param {number} teamMemberId - ID du membre d'équipe
+   * @param {Object} updates - Informations à mettre à jour
+   * @param {number} requesterId - ID de l'utilisateur qui fait la demande
+   * @returns {Promise<Object>} - Membre d'équipe mis à jour
+   */
+  async updateTeamMember(teamMemberId, updates, requesterId) {
+    try {
+      // Récupérer le membre d'équipe
+      const teamMember = await prisma.filmTeamMember.findUnique({
+        where: { id: teamMemberId },
+        include: {
+          film: true,
+          user: true
+        }
+      });
+      
+      if (!teamMember) {
+        throw new Error('Membre d\'équipe non trouvé');
+      }
+      
+      // Vérifier que le demandeur est autorisé (créateur du film ou le membre lui-même)
+      if (teamMember.film.creatorId !== requesterId && teamMember.userId !== requesterId) {
+        throw new Error('Vous n\'êtes pas autorisé à modifier ce membre d\'équipe');
+      }
+      
+      // Vérifier que le rôle est valide si une mise à jour du rôle est demandée
+      if (updates.role && !this.teamRoles.includes(updates.role)) {
+        throw new Error(`Rôle invalide. Les rôles valides sont: ${this.teamRoles.join(', ')}`);
+      }
+      
+      // Mettre à jour le membre d'équipe
+      const updatedTeamMember = await prisma.filmTeamMember.update({
+        where: { id: teamMemberId },
+        data: {
+          role: updates.role,
+          // Ajouter d'autres champs si nécessaire
+        },
+        include: {
+          user: {
+            select: {
+              id: true,
+              name: true,
+              email: true,
+              type: true,
+              profilePictureUrl: true
+            }
+          },
+          film: {
+            select: {
+              id: true,
+              title: true
+            }
+          }
+        }
+      });
+      
+      return {
+        id: updatedTeamMember.id,
+        role: updatedTeamMember.role,
+        joinedAt: updatedTeamMember.joinedAt,
+        user: updatedTeamMember.user,
+        film: updatedTeamMember.film
+      };
+    } catch (error) {
+      console.error('Erreur lors de la mise à jour du membre d\'équipe:', error);
+      throw new Error(`Échec de la mise à jour: ${error.message}`);
+    }
+  }
+
+  /**
+   * Récupère toutes les invitations en attente pour un film
+   * @param {number} filmId - ID du film
+   * @param {number} requesterId - ID de l'utilisateur qui fait la demande
+   * @returns {Promise<Array>} - Liste des invitations en attente
+   */
+  async getPendingInvitations(filmId, requesterId) {
+    try {
+      // Vérifier que le film existe et que le demandeur est le créateur
+      const film = await prisma.film.findUnique({
+        where: { id: filmId }
+      });
+      
+      if (!film) {
+        throw new Error('Film non trouvé');
+      }
+      
+      if (film.creatorId !== requesterId) {
+        throw new Error('Vous n\'êtes pas autorisé à voir les invitations pour ce film');
+      }
+      
+      // Récupérer les invitations en attente
+      const pendingInvitations = await prisma.teamInvitation.findMany({
+        where: {
+          filmId,
+          status: 'pending'
+        },
+        orderBy: {
+          createdAt: 'desc'
+        }
+      });
+      
+      return pendingInvitations.map(invitation => ({
+        id: invitation.id,
+        email: invitation.email,
+        name: invitation.name,
+        role: invitation.role,
+        createdAt: invitation.createdAt,
+        expiresAt: invitation.expiresAt
+      }));
+    } catch (error) {
+      console.error('Erreur lors de la récupération des invitations en attente:', error);
+      throw new Error(`Échec de la récupération des invitations: ${error.message}`);
+    }
+  }
+
+  /**
+   * Annule une invitation en attente
+   * @param {number} invitationId - ID de l'invitation
+   * @param {number} requesterId - ID de l'utilisateur qui fait la demande
+   * @returns {Promise<Object>} - Résultat de l'opération
+   */
+  async cancelInvitation(invitationId, requesterId) {
+    try {
+      // Récupérer l'invitation
+      const invitation = await prisma.teamInvitation.findUnique({
+        where: { id: invitationId },
+        include: {
+          film: true
+        }
+      });
+      
+      if (!invitation) {
+        throw new Error('Invitation non trouvée');
+      }
+      
+      // Vérifier que le demandeur est le créateur de l'invitation
+      if (invitation.creatorId !== requesterId && invitation.film.creatorId !== requesterId) {
+        throw new Error('Vous n\'êtes pas autorisé à annuler cette invitation');
+      }
+      
+      // Vérifier que l'invitation est encore en attente
+      if (invitation.status !== 'pending') {
+        throw new Error(`Cette invitation a déjà été ${invitation.status}`);
+      }
+      
+      // Annuler l'invitation
+      const updatedInvitation = await prisma.teamInvitation.update({
+        where: { id: invitationId },
+        data: {
+          status: 'cancelled',
+          updatedAt: new Date()
+        }
+      });
+      
+      return {
+        success: true,
+        message: 'Invitation annulée avec succès',
+        invitation: {
+          id: updatedInvitation.id,
+          email: updatedInvitation.email,
+          status: updatedInvitation.status
+        }
+      };
+    } catch (error) {
+      console.error('Erreur lors de l\'annulation de l\'invitation:', error);
+      throw new Error(`Échec de l'annulation de l'invitation: ${error.message}`);
+    }
+  }
+
+  /**
+   * Envoie une invitation par email (simulé)
+   * @param {Object} invitation - Détails de l'invitation
+   * @param {string} invitationLink - Lien d'invitation
+   * @returns {Promise<boolean>} - Succès de l'envoi
+   */
+  async sendInvitationEmail(invitation, invitationLink) {
+    try {
+      // Récupérer les informations du film et du créateur
+      const film = await prisma.film.findUnique({
+        where: { id: invitation.filmId },
+        select: {
+          title: true
+        }
+      });
+      
+      const creator = await prisma.user.findUnique({
+        where: { id: invitation.creatorId },
+        select: {
+          name: true
+        }
+      });
+      
+      // Simuler l'envoi d'un email
+      console.log(`
+        === SIMULATION D'ENVOI D'EMAIL ===
+        À: ${invitation.email}
+        Sujet: Invitation à rejoindre l'équipe du film "${film.title}"
+        
+        Bonjour ${invitation.name || ''},
+        
+        ${creator.name} vous invite à rejoindre l'équipe du film "${film.title}" en tant que ${invitation.role}.
+        
+        Pour accepter cette invitation, veuillez cliquer sur le lien suivant:
+        ${invitationLink}
+        
+        Cette invitation expire le ${invitation.expiresAt.toLocaleDateString()}.
+        
+        Cordialement,
+        L'équipe Karangou Studios
+      `);
+      
+      // Dans une implémentation réelle, un service d'envoi d'email serait utilisé ici
+      
+      return true;
+    } catch (error) {
+      console.error('Erreur lors de l\'envoi de l\'email d\'invitation:', error);
+      return false;
+    }
+  }
+}
+
+// Exporter une instance unique du service
+module.exports = new TeamService();

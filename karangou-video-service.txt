@@ -1,0 +1,754 @@
+// Fichier: server/services/video/index.js
+
+const { PrismaClient } = require('@prisma/client');
+const jwt = require('jsonwebtoken');
+const path = require('path');
+const fs = require('fs');
+const ffmpeg = require('fluent-ffmpeg');
+const { S3Client, GetObjectCommand, PutObjectCommand } = require('@aws-sdk/client-s3');
+const { getSignedUrl } = require('@aws-sdk/s3-request-presigner');
+const { v4: uuidv4 } = require('uuid');
+
+const prisma = new PrismaClient();
+
+/**
+ * Service de gestion des vidéos pour Karangou Studios
+ * Gère le streaming adaptatif et la protection du contenu
+ */
+class VideoService {
+  constructor() {
+    this.s3Client = new S3Client({
+      region: process.env.AWS_REGION || 'eu-west-1',
+      credentials: {
+        accessKeyId: process.env.AWS_ACCESS_KEY,
+        secretAccessKey: process.env.AWS_SECRET_KEY
+      }
+    });
+    
+    this.bucketName = process.env.AWS_S3_BUCKET || 'karangou-videos';
+    this.cdnBasePath = process.env.CDN_BASE_URL || 'https://cdn.karangou-studios.com';
+    this.localStoragePath = process.env.LOCAL_VIDEO_PATH || path.join(process.cwd(), 'storage', 'videos');
+    
+    // Créer le répertoire de stockage local s'il n'existe pas
+    if (!fs.existsSync(this.localStoragePath)) {
+      fs.mkdirSync(this.localStoragePath, { recursive: true });
+    }
+  }
+
+  /**
+   * Génère un jeton signé pour l'accès aux vidéos
+   * @param {number} userId - ID de l'utilisateur
+   * @param {number} filmId - ID du film
+   * @param {string} expiration - Durée de validité du jeton (e.g., '2h')
+   * @returns {string} - Jeton d'accès signé
+   */
+  generateVideoToken(userId, filmId, expiration = '2h') {
+    const sessionId = uuidv4();
+    
+    const token = jwt.sign(
+      { userId, filmId, sessionId },
+      process.env.VIDEO_TOKEN_SECRET || 'video-secret',
+      { expiresIn: expiration }
+    );
+    
+    return token;
+  }
+
+  /**
+   * Vérifie un jeton d'accès vidéo
+   * @param {string} token - Jeton à vérifier
+   * @returns {Object} - Données du jeton décodé ou null si invalide
+   */
+  verifyVideoToken(token) {
+    try {
+      const decoded = jwt.verify(
+        token,
+        process.env.VIDEO_TOKEN_SECRET || 'video-secret'
+      );
+      
+      return decoded;
+    } catch (error) {
+      console.error('Erreur de vérification du jeton vidéo:', error);
+      return null;
+    }
+  }
+
+  /**
+   * Récupère l'URL de streaming pour un film
+   * @param {number} filmId - ID du film
+   * @param {string} token - Jeton d'accès vidéo
+   * @param {string} quality - Qualité demandée ('low', 'medium', 'high', 'auto')
+   * @returns {Promise<Object>} - Informations de streaming
+   */
+  async getStreamingUrl(filmId, token, quality = 'auto') {
+    try {
+      // Vérifier le jeton
+      const decoded = this.verifyVideoToken(token);
+      
+      if (!decoded || decoded.filmId !== parseInt(filmId)) {
+        throw new Error('Jeton d\'accès vidéo invalide ou expiré');
+      }
+      
+      // Récupérer les informations du film
+      const film = await prisma.film.findUnique({
+        where: { id: parseInt(filmId) }
+      });
+      
+      if (!film) {
+        throw new Error('Film non trouvé');
+      }
+      
+      // Déterminer le chemin de la vidéo selon la qualité
+      let videoPath = film.videoUrl;
+      
+      if (quality !== 'auto' && quality !== 'high') {
+        // Si une qualité spécifique est demandée, utiliser la version correspondante
+        const baseName = path.basename(film.videoUrl, path.extname(film.videoUrl));
+        const ext = path.extname(film.videoUrl);
+        
+        videoPath = path.join(
+          path.dirname(film.videoUrl),
+          `${baseName}_${quality}${ext}`
+        );
+      }
+      
+      // Générer l'URL signée pour le streaming
+      let streamingUrl;
+      
+      if (videoPath.startsWith('s3://')) {
+        // Vidéo stockée sur S3
+        const s3Path = videoPath.replace('s3://', '').split('/');
+        const bucketName = s3Path[0];
+        const key = s3Path.slice(1).join('/');
+        
+        const command = new GetObjectCommand({
+          Bucket: bucketName,
+          Key: key
+        });
+        
+        // Générer une URL signée valide pour 1 heure
+        streamingUrl = await getSignedUrl(this.s3Client, command, { expiresIn: 3600 });
+      } else if (videoPath.startsWith('http://') || videoPath.startsWith('https://')) {
+        // Vidéo accessible via URL publique
+        streamingUrl = videoPath;
+      } else {
+        // Vidéo stockée localement
+        streamingUrl = `${process.env.API_BASE_URL}/api/videos/stream/${filmId}/${quality}?token=${token}`;
+      }
+      
+      // Enregistrer le début du visionnage
+      await this.recordViewingStart(decoded.userId, filmId);
+      
+      return {
+        filmId,
+        title: film.title,
+        streamingUrl,
+        quality,
+        sessionId: decoded.sessionId,
+        expiresAt: new Date(decoded.exp * 1000).toISOString()
+      };
+    } catch (error) {
+      console.error('Erreur lors de la récupération de l\'URL de streaming:', error);
+      throw new Error(`Échec de la récupération de l'URL: ${error.message}`);
+    }
+  }
+
+  /**
+   * Enregistre le début d'un visionnage
+   * @param {number} userId - ID de l'utilisateur
+   * @param {number} filmId - ID du film
+   * @returns {Promise<Object>} - Enregistrement de visionnage créé ou mis à jour
+   */
+  async recordViewingStart(userId, filmId) {
+    try {
+      // Vérifier si un visionnage existe déjà pour cet utilisateur et ce film
+      const existingViewing = await prisma.filmViewing.findFirst({
+        where: {
+          userId,
+          filmId
+        }
+      });
+      
+      if (existingViewing) {
+        // Mettre à jour le visionnage existant
+        return await prisma.filmViewing.update({
+          where: { id: existingViewing.id },
+          data: {
+            updatedAt: new Date()
+          }
+        });
+      } else {
+        // Créer un nouveau visionnage
+        const newViewing = await prisma.filmViewing.create({
+          data: {
+            userId,
+            filmId,
+            progress: 0,
+            completed: false,
+            createdAt: new Date(),
+            updatedAt: new Date()
+          }
+        });
+        
+        // Incrémenter le compteur de vues du film
+        await prisma.film.update({
+          where: { id: filmId },
+          data: {
+            viewCount: {
+              increment: 1
+            }
+          }
+        });
+        
+        return newViewing;
+      }
+    } catch (error) {
+      console.error('Erreur lors de l\'enregistrement du début de visionnage:', error);
+      // Ne pas propager l'erreur pour ne pas bloquer le visionnage
+      return null;
+    }
+  }
+
+  /**
+   * Met à jour la progression d'un visionnage
+   * @param {number} userId - ID de l'utilisateur
+   * @param {number} filmId - ID du film
+   * @param {number} progress - Progression en pourcentage (0-100)
+   * @param {boolean} completed - Si le film a été vu jusqu'à la fin
+   * @returns {Promise<Object>} - Enregistrement de visionnage mis à jour
+   */
+  async updateViewingProgress(userId, filmId, progress, completed = false) {
+    try {
+      // Vérifier si un visionnage existe déjà
+      const existingViewing = await prisma.filmViewing.findFirst({
+        where: {
+          userId,
+          filmId
+        }
+      });
+      
+      if (existingViewing) {
+        // Mettre à jour le visionnage existant
+        return await prisma.filmViewing.update({
+          where: { id: existingViewing.id },
+          data: {
+            progress,
+            completed,
+            updatedAt: new Date()
+          }
+        });
+      } else {
+        // Créer un nouveau visionnage avec la progression
+        return await prisma.filmViewing.create({
+          data: {
+            userId,
+            filmId,
+            progress,
+            completed,
+            createdAt: new Date(),
+            updatedAt: new Date()
+          }
+        });
+      }
+    } catch (error) {
+      console.error('Erreur lors de la mise à jour de la progression:', error);
+      throw new Error(`Échec de la mise à jour: ${error.message}`);
+    }
+  }
+
+  /**
+   * Téléverse une nouvelle vidéo
+   * @param {Object} file - Fichier vidéo téléversé
+   * @param {number} filmId - ID du film associé
+   * @returns {Promise<Object>} - Informations sur la vidéo téléversée
+   */
+  async uploadVideo(file, filmId) {
+    try {
+      const film = await prisma.film.findUnique({
+        where: { id: parseInt(filmId) }
+      });
+      
+      if (!film) {
+        throw new Error('Film non trouvé');
+      }
+      
+      const filename = `${filmId}_${Date.now()}${path.extname(file.originalname)}`;
+      const filePath = path.join(this.localStoragePath, filename);
+      
+      // Écrire le fichier localement d'abord
+      await fs.promises.writeFile(filePath, file.buffer);
+      
+      // Générer les différentes qualités
+      await this.generateEncodings(filePath, filmId);
+      
+      // Si S3 est configuré, téléverser les fichiers
+      if (process.env.USE_S3 === 'true') {
+        await this.uploadToS3(filePath, filmId);
+        
+        // Supprimer les fichiers locaux après téléversement
+        const baseName = path.basename(filePath, path.extname(filePath));
+        const files = [
+          filePath,
+          path.join(this.localStoragePath, `${baseName}_low${path.extname(filePath)}`),
+          path.join(this.localStoragePath, `${baseName}_medium${path.extname(filePath)}`)
+        ];
+        
+        for (const file of files) {
+          if (fs.existsSync(file)) {
+            await fs.promises.unlink(file);
+          }
+        }
+        
+        // Mettre à jour l'URL de la vidéo dans la base de données
+        await prisma.film.update({
+          where: { id: parseInt(filmId) },
+          data: {
+            videoUrl: `s3://${this.bucketName}/films/${filmId}/${filename}`
+          }
+        });
+        
+        return {
+          filmId,
+          videoUrl: `s3://${this.bucketName}/films/${filmId}/${filename}`,
+          versions: [
+            `s3://${this.bucketName}/films/${filmId}/${baseName}_low${path.extname(filePath)}`,
+            `s3://${this.bucketName}/films/${filmId}/${baseName}_medium${path.extname(filePath)}`,
+            `s3://${this.bucketName}/films/${filmId}/${filename}`
+          ]
+        };
+      } else {
+        // Utiliser le stockage local
+        const relativePath = path.relative(this.localStoragePath, filePath);
+        const videoUrl = `/storage/videos/${relativePath}`;
+        
+        // Mettre à jour l'URL de la vidéo dans la base de données
+        await prisma.film.update({
+          where: { id: parseInt(filmId) },
+          data: {
+            videoUrl
+          }
+        });
+        
+        const baseName = path.basename(filePath, path.extname(filePath));
+        
+        return {
+          filmId,
+          videoUrl,
+          versions: [
+            `/storage/videos/${baseName}_low${path.extname(filePath)}`,
+            `/storage/videos/${baseName}_medium${path.extname(filePath)}`,
+            videoUrl
+          ]
+        };
+      }
+    } catch (error) {
+      console.error('Erreur lors du téléversement de la vidéo:', error);
+      throw new Error(`Échec du téléversement: ${error.message}`);
+    }
+  }
+
+  /**
+   * Génère les différentes encodages d'une vidéo
+   * @param {string} filePath - Chemin du fichier vidéo original
+   * @param {number} filmId - ID du film associé
+   * @returns {Promise<Array>} - Liste des chemins des vidéos encodées
+   */
+  async generateEncodings(filePath, filmId) {
+    try {
+      const baseName = path.basename(filePath, path.extname(filePath));
+      const ext = path.extname(filePath);
+      const outputDir = path.dirname(filePath);
+      
+      const lowQualityPath = path.join(outputDir, `${baseName}_low${ext}`);
+      const mediumQualityPath = path.join(outputDir, `${baseName}_medium${ext}`);
+      
+      // Générer la version basse qualité (360p)
+      await new Promise((resolve, reject) => {
+        ffmpeg(filePath)
+          .outputOptions([
+            '-c:v libx264',
+            '-crf 28',
+            '-preset faster',
+            '-r 24',
+            '-s 640x360',
+            '-c:a aac',
+            '-b:a 96k'
+          ])
+          .output(lowQualityPath)
+          .on('end', resolve)
+          .on('error', reject)
+          .run();
+      });
+      
+      // Générer la version qualité moyenne (720p)
+      await new Promise((resolve, reject) => {
+        ffmpeg(filePath)
+          .outputOptions([
+            '-c:v libx264',
+            '-crf 23',
+            '-preset faster',
+            '-r 24',
+            '-s 1280x720',
+            '-c:a aac',
+            '-b:a 128k'
+          ])
+          .output(mediumQualityPath)
+          .on('end', resolve)
+          .on('error', reject)
+          .run();
+      });
+      
+      return [lowQualityPath, mediumQualityPath, filePath];
+    } catch (error) {
+      console.error('Erreur lors de l\'encodage des vidéos:', error);
+      throw new Error(`Échec de l'encodage: ${error.message}`);
+    }
+  }
+
+  /**
+   * Téléverse une vidéo vers Amazon S3
+   * @param {string} filePath - Chemin du fichier vidéo local
+   * @param {number} filmId - ID du film associé
+   * @returns {Promise<Array>} - Liste des URLs S3 des vidéos téléversées
+   */
+  async uploadToS3(filePath, filmId) {
+    try {
+      const baseName = path.basename(filePath, path.extname(filePath));
+      const ext = path.extname(filePath);
+      const outputDir = path.dirname(filePath);
+      
+      const files = [
+        {
+          path: filePath,
+          key: `films/${filmId}/${path.basename(filePath)}`
+        },
+        {
+          path: path.join(outputDir, `${baseName}_low${ext}`),
+          key: `films/${filmId}/${baseName}_low${ext}`
+        },
+        {
+          path: path.join(outputDir, `${baseName}_medium${ext}`),
+          key: `films/${filmId}/${baseName}_medium${ext}`
+        }
+      ];
+      
+      const uploadPromises = files.map(async (file) => {
+        const fileContent = await fs.promises.readFile(file.path);
+        
+        const command = new PutObjectCommand({
+          Bucket: this.bucketName,
+          Key: file.key,
+          Body: fileContent,
+          ContentType: 'video/mp4'
+        });
+        
+        await this.s3Client.send(command);
+        
+        return `s3://${this.bucketName}/${file.key}`;
+      });
+      
+      return await Promise.all(uploadPromises);
+    } catch (error) {
+      console.error('Erreur lors du téléversement vers S3:', error);
+      throw new Error(`Échec du téléversement S3: ${error.message}`);
+    }
+  }
+
+  /**
+   * Diffuse une vidéo en streaming
+   * @param {Object} req - Requête Express
+   * @param {Object} res - Réponse Express
+   * @returns {void}
+   */
+  streamVideo(req, res) {
+    const { filmId, quality = 'high' } = req.params;
+    const token = req.query.token;
+    
+    // Vérifier le jeton
+    const decoded = this.verifyVideoToken(token);
+    
+    if (!decoded || decoded.filmId !== parseInt(filmId)) {
+      return res.status(403).json({ error: 'Accès non autorisé' });
+    }
+    
+    // Déterminer le chemin du fichier
+    prisma.film.findUnique({
+      where: { id: parseInt(filmId) }
+    }).then(film => {
+      if (!film) {
+        return res.status(404).json({ error: 'Film non trouvé' });
+      }
+      
+      let videoPath = film.videoUrl;
+      
+      if (quality !== 'high') {
+        // Si une qualité spécifique est demandée, utiliser la version correspondante
+        const baseName = path.basename(film.videoUrl, path.extname(film.videoUrl));
+        const ext = path.extname(film.videoUrl);
+        
+        videoPath = path.join(
+          path.dirname(film.videoUrl),
+          `${baseName}_${quality}${ext}`
+        );
+      }
+      
+      // Si le chemin est une URL absolue, rediriger
+      if (videoPath.startsWith('http://') || videoPath.startsWith('https://')) {
+        return res.redirect(videoPath);
+      }
+      
+      // Convertir le chemin relatif en absolu
+      if (videoPath.startsWith('/')) {
+        videoPath = path.join(process.cwd(), 'public', videoPath);
+      }
+      
+      // Vérifier que le fichier existe
+      if (!fs.existsSync(videoPath)) {
+        return res.status(404).json({ error: 'Fichier vidéo non trouvé' });
+      }
+      
+      // Obtenir les statistiques du fichier
+      const stat = fs.statSync(videoPath);
+      const fileSize = stat.size;
+      const range = req.headers.range;
+      
+      if (range) {
+        // Streaming partiel (plage demandée)
+        const parts = range.replace(/bytes=/, '').split('-');
+        const start = parseInt(parts[0], 10);
+        const end = parts[1] ? parseInt(parts[1], 10) : fileSize - 1;
+        const chunkSize = (end - start) + 1;
+        const file = fs.createReadStream(videoPath, { start, end });
+        
+        const headers = {
+          'Content-Range': `bytes ${start}-${end}/${fileSize}`,
+          'Accept-Ranges': 'bytes',
+          'Content-Length': chunkSize,
+          'Content-Type': 'video/mp4'
+        };
+        
+        res.writeHead(206, headers);
+        file.pipe(res);
+      } else {
+        // Streaming complet
+        const headers = {
+          'Content-Length': fileSize,
+          'Content-Type': 'video/mp4'
+        };
+        
+        res.writeHead(200, headers);
+        fs.createReadStream(videoPath).pipe(res);
+      }
+    }).catch(error => {
+      console.error('Erreur lors du streaming vidéo:', error);
+      res.status(500).json({ error: 'Erreur de streaming vidéo' });
+    });
+  }
+
+  /**
+   * Ajoute un filigrane dynamique à une vidéo
+   * @param {string} inputPath - Chemin de la vidéo d'entrée
+   * @param {string} outputPath - Chemin de sortie pour la vidéo avec filigrane
+   * @param {string} watermarkText - Texte du filigrane (e.g., ID de session)
+   * @returns {Promise<string>} - Chemin de la vidéo avec filigrane
+   */
+  async addWatermark(inputPath, outputPath, watermarkText) {
+    try {
+      await new Promise((resolve, reject) => {
+        ffmpeg(inputPath)
+          .outputOptions([
+            '-vf', `drawtext=text='${watermarkText}':x=(w-text_w)/2:y=h-th-10:fontsize=24:fontcolor=white@0.5:shadowcolor=black@0.5:shadowx=2:shadowy=2`
+          ])
+          .output(outputPath)
+          .on('end', resolve)
+          .on('error', reject)
+          .run();
+      });
+      
+      return outputPath;
+    } catch (error) {
+      console.error('Erreur lors de l\'ajout du filigrane:', error);
+      throw new Error(`Échec de l'ajout du filigrane: ${error.message}`);
+    }
+  }
+
+  /**
+   * Récupère un fichier HLS (HTTP Live Streaming) pour la vidéo
+   * @param {number} filmId - ID du film
+   * @returns {Promise<string>} - Chemin du fichier manifeste HLS
+   */
+  async getHlsManifest(filmId) {
+    try {
+      const film = await prisma.film.findUnique({
+        where: { id: parseInt(filmId) }
+      });
+      
+      if (!film) {
+        throw new Error('Film non trouvé');
+      }
+      
+      const videoPath = film.videoUrl;
+      const hlsDir = path.join(this.localStoragePath, 'hls', `${filmId}`);
+      const manifestPath = path.join(hlsDir, 'master.m3u8');
+      
+      // Vérifier si le manifeste existe déjà
+      if (fs.existsSync(manifestPath)) {
+        return manifestPath;
+      }
+      
+      // Créer le répertoire pour les fichiers HLS
+      if (!fs.existsSync(hlsDir)) {
+        fs.mkdirSync(hlsDir, { recursive: true });
+      }
+      
+      // Générer les segments HLS
+      await new Promise((resolve, reject) => {
+        ffmpeg(videoPath)
+          .outputOptions([
+            '-profile:v baseline',
+            '-level 3.0',
+            '-start_number 0',
+            '-hls_time 10',
+            '-hls_list_size 0',
+            '-f hls'
+          ])
+          .output(manifestPath)
+          .on('end', resolve)
+          .on('error', reject)
+          .run();
+      });
+      
+      return manifestPath;
+    } catch (error) {
+      console.error('Erreur lors de la génération du manifeste HLS:', error);
+      throw new Error(`Échec de la génération HLS: ${error.message}`);
+    }
+  }
+
+  /**
+   * Récupère l'historique de visionnage d'un utilisateur
+   * @param {number} userId - ID de l'utilisateur
+   * @param {Object} options - Options de pagination
+   * @returns {Promise<Object>} - Historique de visionnage paginé
+   */
+  async getUserViewingHistory(userId, { page = 1, limit = 20 }) {
+    try {
+      const skip = (page - 1) * limit;
+      
+      const [viewings, total] = await Promise.all([
+        prisma.filmViewing.findMany({
+          where: { userId },
+          orderBy: { updatedAt: 'desc' },
+          skip,
+          take: parseInt(limit),
+          include: {
+            film: {
+              select: {
+                id: true,
+                title: true,
+                posterUrl: true,
+                duration: true,
+                director: true
+              }
+            }
+          }
+        }),
+        prisma.filmViewing.count({ where: { userId } })
+      ]);
+      
+      return {
+        data: viewings,
+        pagination: {
+          total,
+          page: parseInt(page),
+          limit: parseInt(limit),
+          totalPages: Math.ceil(total / limit)
+        }
+      };
+    } catch (error) {
+      console.error('Erreur lors de la récupération de l\'historique de visionnage:', error);
+      throw new Error(`Échec de la récupération: ${error.message}`);
+    }
+  }
+
+  /**
+   * Récupère les films en cours de visionnage (non terminés) pour un utilisateur
+   * @param {number} userId - ID de l'utilisateur
+   * @returns {Promise<Array>} - Liste des films en cours
+   */
+  async getInProgressFilms(userId) {
+    try {
+      return await prisma.filmViewing.findMany({
+        where: {
+          userId,
+          completed: false,
+          progress: {
+            gt: 0
+          }
+        },
+        orderBy: {
+          updatedAt: 'desc'
+        },
+        include: {
+          film: {
+            select: {
+              id: true,
+              title: true,
+              posterUrl: true,
+              duration: true,
+              director: true,
+              synopsis: true
+            }
+          }
+        }
+      });
+    } catch (error) {
+      console.error('Erreur lors de la récupération des films en cours:', error);
+      throw new Error(`Échec de la récupération: ${error.message}`);
+    }
+  }
+
+  /**
+   * Calcule la bande passante estimée de l'utilisateur
+   * @param {string} userIp - Adresse IP de l'utilisateur
+   * @returns {Promise<string>} - Qualité recommandée ('low', 'medium', 'high')
+   */
+  async estimateBandwidth(userIp) {
+    try {
+      // Dans une implémentation réelle, cela pourrait être basé sur:
+      // 1. Des tests actifs de bande passante
+      // 2. Historique des performances par région/IP
+      // 3. Informations fournies par le CDN
+      
+      // Pour cet exemple, on simule une estimation basique
+      // basée sur la géolocalisation IP (les IPs africaines obtiennent généralement low/medium)
+      
+      // Simulation d'un service de géolocalisation IP
+      const isAfricanIP = userIp.startsWith('41.') || 
+                          userIp.startsWith('102.') || 
+                          userIp.startsWith('105.') || 
+                          userIp.startsWith('197.');
+      
+      if (isAfricanIP) {
+        // Simuler une distribution réaliste pour l'Afrique
+        const random = Math.random();
+        if (random < 0.4) return 'low';
+        if (random < 0.8) return 'medium';
+        return 'high';
+      } else {
+        // Pour les IPs non-africaines
+        const random = Math.random();
+        if (random < 0.2) return 'low';
+        if (random < 0.5) return 'medium';
+        return 'high';
+      }
+    } catch (error) {
+      console.error('Erreur lors de l\'estimation de la bande passante:', error);
+      // Par défaut, utiliser la qualité moyenne en cas d'erreur
+      return 'medium';
+    }
+  }
+}
+
+// Exporter une instance unique du service
+module.exports = new VideoService();

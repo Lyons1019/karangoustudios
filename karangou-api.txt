@@ -1,0 +1,707 @@
+// Fichier: server/api/index.js
+const express = require('express');
+const cors = require('cors');
+const bodyParser = require('body-parser');
+const jwt = require('jsonwebtoken');
+const { PrismaClient } = require('@prisma/client');
+
+const prisma = new PrismaClient();
+const app = express();
+
+// Middleware
+app.use(cors());
+app.use(bodyParser.json());
+
+// Middleware d'authentification
+const authenticateToken = (req, res, next) => {
+  const authHeader = req.headers['authorization'];
+  const token = authHeader && authHeader.split(' ')[1];
+  
+  if (!token) return res.status(401).json({ error: 'Accès non autorisé' });
+  
+  jwt.verify(token, process.env.JWT_SECRET, (err, user) => {
+    if (err) return res.status(403).json({ error: 'Token invalide' });
+    req.user = user;
+    next();
+  });
+};
+
+// Routes d'authentification
+app.post('/auth/register', async (req, res) => {
+  const { name, email, password, country } = req.body;
+  
+  try {
+    // Vérifier si l'email existe déjà
+    const existingUser = await prisma.user.findUnique({
+      where: { email }
+    });
+    
+    if (existingUser) {
+      return res.status(400).json({ error: 'Cet email est déjà utilisé' });
+    }
+    
+    // Créer le nouvel utilisateur
+    const user = await prisma.user.create({
+      data: {
+        name,
+        email,
+        password: await bcrypt.hash(password, 10), // Hashage du mot de passe
+        country,
+        type: 'viewer', // Par défaut, un utilisateur est un spectateur
+        createdAt: new Date()
+      }
+    });
+    
+    // Générer le token JWT
+    const token = jwt.sign(
+      { id: user.id, email: user.email, type: user.type },
+      process.env.JWT_SECRET,
+      { expiresIn: '7d' }
+    );
+    
+    res.status(201).json({
+      token,
+      user: {
+        id: user.id,
+        name: user.name,
+        email: user.email,
+        type: user.type,
+        country: user.country
+      }
+    });
+    
+  } catch (error) {
+    console.error('Erreur lors de l\'inscription:', error);
+    res.status(500).json({ error: 'Erreur lors de l\'inscription' });
+  }
+});
+
+app.post('/auth/login', async (req, res) => {
+  const { email, password } = req.body;
+  
+  try {
+    // Rechercher l'utilisateur par email
+    const user = await prisma.user.findUnique({
+      where: { email }
+    });
+    
+    if (!user) {
+      return res.status(404).json({ error: 'Utilisateur non trouvé' });
+    }
+    
+    // Vérifier le mot de passe
+    const isPasswordValid = await bcrypt.compare(password, user.password);
+    
+    if (!isPasswordValid) {
+      return res.status(401).json({ error: 'Mot de passe incorrect' });
+    }
+    
+    // Générer le token JWT
+    const token = jwt.sign(
+      { id: user.id, email: user.email, type: user.type },
+      process.env.JWT_SECRET,
+      { expiresIn: '7d' }
+    );
+    
+    res.json({
+      token,
+      user: {
+        id: user.id,
+        name: user.name,
+        email: user.email,
+        type: user.type,
+        country: user.country
+      }
+    });
+    
+  } catch (error) {
+    console.error('Erreur lors de la connexion:', error);
+    res.status(500).json({ error: 'Erreur lors de la connexion' });
+  }
+});
+
+// Routes pour les films
+app.get('/films', async (req, res) => {
+  try {
+    const { genre, sort, page = 1, limit = 10 } = req.query;
+    const skip = (page - 1) * limit;
+    
+    // Construire les filtres
+    const where = {};
+    if (genre) {
+      where.genres = {
+        contains: genre
+      };
+    }
+    
+    // Définir l'ordre de tri
+    let orderBy = { releaseDate: 'desc' };
+    if (sort === 'title') orderBy = { title: 'asc' };
+    if (sort === 'popular') orderBy = { viewCount: 'desc' };
+    
+    // Récupérer les films avec pagination
+    const films = await prisma.film.findMany({
+      where,
+      orderBy,
+      skip: parseInt(skip),
+      take: parseInt(limit),
+      include: {
+        projects: {
+          select: {
+            id: true,
+            title: true
+          }
+        }
+      }
+    });
+    
+    // Compter le nombre total de films pour la pagination
+    const total = await prisma.film.count({ where });
+    
+    res.json({
+      data: films,
+      pagination: {
+        total,
+        page: parseInt(page),
+        limit: parseInt(limit),
+        totalPages: Math.ceil(total / limit)
+      }
+    });
+    
+  } catch (error) {
+    console.error('Erreur lors de la récupération des films:', error);
+    res.status(500).json({ error: 'Erreur lors de la récupération des films' });
+  }
+});
+
+app.get('/films/:id', async (req, res) => {
+  const { id } = req.params;
+  
+  try {
+    const film = await prisma.film.findUnique({
+      where: { id: parseInt(id) },
+      include: {
+        projects: true,
+        comments: {
+          include: {
+            user: {
+              select: {
+                id: true,
+                name: true
+              }
+            }
+          },
+          orderBy: {
+            createdAt: 'desc'
+          }
+        }
+      }
+    });
+    
+    if (!film) {
+      return res.status(404).json({ error: 'Film non trouvé' });
+    }
+    
+    res.json(film);
+    
+  } catch (error) {
+    console.error('Erreur lors de la récupération du film:', error);
+    res.status(500).json({ error: 'Erreur lors de la récupération du film' });
+  }
+});
+
+// Enregistrement du visionnage d'un film
+app.post('/films/:id/viewing', authenticateToken, async (req, res) => {
+  const { id } = req.params;
+  const userId = req.user.id;
+  const { progress, completed } = req.body;
+  
+  try {
+    // Vérifier si un visionnage existe déjà
+    const existingViewing = await prisma.filmViewing.findFirst({
+      where: {
+        filmId: parseInt(id),
+        userId
+      }
+    });
+    
+    let viewing;
+    
+    if (existingViewing) {
+      // Mettre à jour le visionnage existant
+      viewing = await prisma.filmViewing.update({
+        where: { id: existingViewing.id },
+        data: {
+          progress,
+          completed,
+          updatedAt: new Date()
+        }
+      });
+    } else {
+      // Créer un nouveau visionnage
+      viewing = await prisma.filmViewing.create({
+        data: {
+          film: { connect: { id: parseInt(id) } },
+          user: { connect: { id: userId } },
+          progress,
+          completed,
+          createdAt: new Date(),
+          updatedAt: new Date()
+        }
+      });
+      
+      // Incrémenter le compteur de vues du film
+      await prisma.film.update({
+        where: { id: parseInt(id) },
+        data: {
+          viewCount: {
+            increment: 1
+          }
+        }
+      });
+    }
+    
+    res.status(201).json(viewing);
+    
+  } catch (error) {
+    console.error('Erreur lors de l\'enregistrement du visionnage:', error);
+    res.status(500).json({ error: 'Erreur lors de l\'enregistrement du visionnage' });
+  }
+});
+
+// Ajout d'un commentaire sur un film
+app.post('/films/:id/comments', authenticateToken, async (req, res) => {
+  const { id } = req.params;
+  const userId = req.user.id;
+  const { content, rating } = req.body;
+  
+  try {
+    const comment = await prisma.comment.create({
+      data: {
+        film: { connect: { id: parseInt(id) } },
+        user: { connect: { id: userId } },
+        content,
+        rating: rating ? parseInt(rating) : null,
+        createdAt: new Date()
+      },
+      include: {
+        user: {
+          select: {
+            id: true,
+            name: true
+          }
+        }
+      }
+    });
+    
+    // Mettre à jour la note moyenne du film
+    if (rating) {
+      const filmComments = await prisma.comment.findMany({
+        where: {
+          filmId: parseInt(id),
+          rating: { not: null }
+        },
+        select: { rating: true }
+      });
+      
+      const totalRating = filmComments.reduce((sum, comment) => sum + comment.rating, 0);
+      const averageRating = totalRating / filmComments.length;
+      
+      await prisma.film.update({
+        where: { id: parseInt(id) },
+        data: {
+          averageRating: averageRating
+        }
+      });
+    }
+    
+    res.status(201).json(comment);
+    
+  } catch (error) {
+    console.error('Erreur lors de l\'ajout du commentaire:', error);
+    res.status(500).json({ error: 'Erreur lors de l\'ajout du commentaire' });
+  }
+});
+
+// Routes pour les projets
+app.get('/projects', async (req, res) => {
+  try {
+    const { status, sort, page = 1, limit = 10 } = req.query;
+    const skip = (page - 1) * limit;
+    
+    // Construire les filtres
+    const where = {};
+    if (status) {
+      where.status = status;
+    }
+    
+    // Définir l'ordre de tri
+    let orderBy = { createdAt: 'desc' };
+    if (sort === 'title') orderBy = { title: 'asc' };
+    if (sort === 'funding') orderBy = { currentAmount: 'desc' };
+    if (sort === 'deadline') orderBy = { endDate: 'asc' };
+    
+    // Récupérer les projets avec pagination
+    const projects = await prisma.project.findMany({
+      where,
+      orderBy,
+      skip: parseInt(skip),
+      take: parseInt(limit),
+      include: {
+        associatedFilm: {
+          select: {
+            id: true,
+            title: true,
+            posterUrl: true
+          }
+        }
+      }
+    });
+    
+    // Compter le nombre total de projets pour la pagination
+    const total = await prisma.project.count({ where });
+    
+    res.json({
+      data: projects,
+      pagination: {
+        total,
+        page: parseInt(page),
+        limit: parseInt(limit),
+        totalPages: Math.ceil(total / limit)
+      }
+    });
+    
+  } catch (error) {
+    console.error('Erreur lors de la récupération des projets:', error);
+    res.status(500).json({ error: 'Erreur lors de la récupération des projets' });
+  }
+});
+
+app.get('/projects/:id', async (req, res) => {
+  const { id } = req.params;
+  
+  try {
+    const project = await prisma.project.findUnique({
+      where: { id: parseInt(id) },
+      include: {
+        associatedFilm: true,
+        documents: true,
+        contributions: {
+          include: {
+            user: {
+              select: {
+                id: true,
+                name: true
+              }
+            }
+          },
+          orderBy: {
+            createdAt: 'desc'
+          },
+          take: 10
+        }
+      }
+    });
+    
+    if (!project) {
+      return res.status(404).json({ error: 'Projet non trouvé' });
+    }
+    
+    res.json(project);
+    
+  } catch (error) {
+    console.error('Erreur lors de la récupération du projet:', error);
+    res.status(500).json({ error: 'Erreur lors de la récupération du projet' });
+  }
+});
+
+// Soumission d'un nouveau projet
+app.post('/projects', authenticateToken, async (req, res) => {
+  const userId = req.user.id;
+  const { title, description, synopsis, genre, targetAmount, endDate, associatedFilmId, documents } = req.body;
+  
+  // Vérifier que l'utilisateur est un réalisateur ou un producteur
+  if (req.user.type !== 'director' && req.user.type !== 'producer') {
+    return res.status(403).json({ error: 'Seuls les réalisateurs et producteurs peuvent soumettre des projets' });
+  }
+  
+  try {
+    // Créer le nouveau projet
+    const project = await prisma.project.create({
+      data: {
+        title,
+        description,
+        synopsis,
+        genre,
+        targetAmount: parseFloat(targetAmount),
+        currentAmount: 0,
+        endDate: new Date(endDate),
+        status: 'pending', // Les projets sont en attente de validation par défaut
+        createdAt: new Date(),
+        user: { connect: { id: userId } },
+        associatedFilm: associatedFilmId ? { connect: { id: parseInt(associatedFilmId) } } : undefined
+      }
+    });
+    
+    // Ajouter les documents du projet
+    if (documents && documents.length > 0) {
+      const documentPromises = documents.map(doc => 
+        prisma.projectDocument.create({
+          data: {
+            title: doc.title,
+            type: doc.type,
+            fileUrl: doc.fileUrl,
+            project: { connect: { id: project.id } }
+          }
+        })
+      );
+      
+      await Promise.all(documentPromises);
+    }
+    
+    // Récupérer le projet avec ses documents
+    const projectWithDocuments = await prisma.project.findUnique({
+      where: { id: project.id },
+      include: { documents: true }
+    });
+    
+    res.status(201).json(projectWithDocuments);
+    
+  } catch (error) {
+    console.error('Erreur lors de la création du projet:', error);
+    res.status(500).json({ error: 'Erreur lors de la création du projet' });
+  }
+});
+
+// Contribuer à un projet
+app.post('/projects/:id/contributions', authenticateToken, async (req, res) => {
+  const { id } = req.params;
+  const userId = req.user.id;
+  const { amount, paymentMethod, transactionId } = req.body;
+  
+  try {
+    // Vérifier que le projet existe
+    const project = await prisma.project.findUnique({
+      where: { id: parseInt(id) }
+    });
+    
+    if (!project) {
+      return res.status(404).json({ error: 'Projet non trouvé' });
+    }
+    
+    // Vérifier que le projet est toujours en phase de financement
+    if (project.status !== 'active' || new Date(project.endDate) < new Date()) {
+      return res.status(400).json({ error: 'Ce projet n\'accepte plus de contributions' });
+    }
+    
+    // Créer la contribution
+    const contribution = await prisma.contribution.create({
+      data: {
+        amount: parseFloat(amount),
+        paymentMethod,
+        transactionId,
+        status: 'completed', // Dans un système réel, ce serait probablement "pending" jusqu'à confirmation
+        createdAt: new Date(),
+        user: { connect: { id: userId } },
+        project: { connect: { id: parseInt(id) } }
+      },
+      include: {
+        user: {
+          select: {
+            id: true,
+            name: true
+          }
+        }
+      }
+    });
+    
+    // Mettre à jour le montant collecté par le projet
+    await prisma.project.update({
+      where: { id: parseInt(id) },
+      data: {
+        currentAmount: {
+          increment: parseFloat(amount)
+        }
+      }
+    });
+    
+    res.status(201).json(contribution);
+    
+  } catch (error) {
+    console.error('Erreur lors de la contribution:', error);
+    res.status(500).json({ error: 'Erreur lors de la contribution' });
+  }
+});
+
+// Systèmes de paiement - Mobile Money
+app.post('/payments/mobile-money/initiate', authenticateToken, async (req, res) => {
+  const { amount, phoneNumber, provider, projectId } = req.body;
+  
+  try {
+    // Ici, vous intégreriez avec l'API réelle du fournisseur de mobile money
+    // Pour l'exemple, nous simulons une réponse réussie
+    
+    // Générer un ID de transaction unique
+    const transactionId = 'MM' + Date.now() + Math.floor(Math.random() * 1000);
+    
+    // Stocker la transaction en attente
+    const transaction = await prisma.paymentTransaction.create({
+      data: {
+        transactionId,
+        amount: parseFloat(amount),
+        method: 'mobile_money',
+        provider,
+        phoneNumber,
+        status: 'pending',
+        projectId: parseInt(projectId),
+        userId: req.user.id,
+        createdAt: new Date()
+      }
+    });
+    
+    // Dans un système réel, vous enverriez une demande à l'API du fournisseur
+    // et vous recevriez un callback lorsque le paiement est confirmé
+    
+    res.json({
+      success: true,
+      transactionId,
+      message: `Demande de paiement envoyée au ${provider} du numéro ${phoneNumber}. Veuillez confirmer sur votre téléphone.`
+    });
+    
+  } catch (error) {
+    console.error('Erreur lors de l\'initiation du paiement mobile money:', error);
+    res.status(500).json({ error: 'Erreur lors de l\'initiation du paiement' });
+  }
+});
+
+// Webhook pour les notifications de paiement mobile money
+app.post('/payments/mobile-money/webhook', async (req, res) => {
+  // Dans un environnement réel, cette route serait appelée par le fournisseur de paiement
+  // pour notifier le statut de la transaction
+  
+  const { transactionId, status, reference } = req.body;
+  
+  try {
+    // Mettre à jour le statut de la transaction
+    const transaction = await prisma.paymentTransaction.update({
+      where: { transactionId },
+      data: {
+        status,
+        updatedAt: new Date()
+      }
+    });
+    
+    // Si le paiement est réussi, créer la contribution et mettre à jour le projet
+    if (status === 'completed') {
+      // Créer la contribution
+      await prisma.contribution.create({
+        data: {
+          amount: transaction.amount,
+          paymentMethod: 'mobile_money',
+          transactionId,
+          status: 'completed',
+          createdAt: new Date(),
+          user: { connect: { id: transaction.userId } },
+          project: { connect: { id: transaction.projectId } }
+        }
+      });
+      
+      // Mettre à jour le montant collecté par le projet
+      await prisma.project.update({
+        where: { id: transaction.projectId },
+        data: {
+          currentAmount: {
+            increment: transaction.amount
+          }
+        }
+      });
+    }
+    
+    res.json({ success: true });
+    
+  } catch (error) {
+    console.error('Erreur lors du traitement du webhook de paiement:', error);
+    res.status(500).json({ error: 'Erreur lors du traitement du webhook' });
+  }
+});
+
+// Système de notifications
+app.get('/notifications', authenticateToken, async (req, res) => {
+  const userId = req.user.id;
+  
+  try {
+    const notifications = await prisma.notification.findMany({
+      where: {
+        userId,
+        isRead: false
+      },
+      orderBy: {
+        createdAt: 'desc'
+      }
+    });
+    
+    res.json(notifications);
+    
+  } catch (error) {
+    console.error('Erreur lors de la récupération des notifications:', error);
+    res.status(500).json({ error: 'Erreur lors de la récupération des notifications' });
+  }
+});
+
+app.put('/notifications/:id/read', authenticateToken, async (req, res) => {
+  const { id } = req.params;
+  const userId = req.user.id;
+  
+  try {
+    const notification = await prisma.notification.findFirst({
+      where: {
+        id: parseInt(id),
+        userId
+      }
+    });
+    
+    if (!notification) {
+      return res.status(404).json({ error: 'Notification non trouvée' });
+    }
+    
+    await prisma.notification.update({
+      where: { id: parseInt(id) },
+      data: {
+        isRead: true,
+        readAt: new Date()
+      }
+    });
+    
+    res.json({ success: true });
+    
+  } catch (error) {
+    console.error('Erreur lors de la mise à jour de la notification:', error);
+    res.status(500).json({ error: 'Erreur lors de la mise à jour de la notification' });
+  }
+});
+
+// Fonction utilitaire pour créer une notification
+const createNotification = async (userId, type, content, relatedId) => {
+  try {
+    await prisma.notification.create({
+      data: {
+        userId,
+        type,
+        content,
+        relatedId,
+        isRead: false,
+        createdAt: new Date()
+      }
+    });
+  } catch (error) {
+    console.error('Erreur lors de la création de la notification:', error);
+  }
+};
+
+// Démarrer le serveur
+const PORT = process.env.PORT || 3001;
+app.listen(PORT, () => {
+  console.log(`Serveur API Karangou Studios en écoute sur le port ${PORT}`);
+});
+
+module.exports = app;

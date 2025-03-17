@@ -1,0 +1,317 @@
+# Architecture technique et plan de développement - Karangou Studios
+
+## 1. Architecture globale
+
+### 1.1 Architecture technique
+
+```
+┌─────────────────────────────────────────────────────────────────────┐
+│                       Client (Frontend)                              │
+│  ┌──────────────┐  ┌──────────────┐  ┌───────────────┐  ┌────────┐  │
+│  │ Interface    │  │ Gestionnaire │  │ Lecteur vidéo │  │ PWA    │  │
+│  │ utilisateur  │  │ d'état (Redux)│  │ personnalisé  │  │        │  │
+│  └──────────────┘  └──────────────┘  └───────────────┘  └────────┘  │
+│  ┌──────────────┐  ┌──────────────┐  ┌───────────────┐              │
+│  │ Module Chat  │  │ Module Appel │  │ Interface     │              │
+│  │ en temps réel│  │ Vidéo WebRTC │  │ publicitaire  │              │
+│  └──────────────┘  └──────────────┘  └───────────────┘              │
+└───────────┬─────────────────────────────────────────────────────────┘
+            │
+            │ API RESTful / GraphQL / WebSocket
+            ▼
+┌─────────────────────────────────────────────────────────────────────┐
+│                       Serveur (Backend)                              │
+│  ┌──────────────┐  ┌──────────────┐  ┌───────────────┐  ┌────────┐  │
+│  │ API Gateway  │  │ Services     │  │ Système       │  │ Jobs   │  │
+│  │              │  │ métiers      │  │ d'auth        │  │ planifiés│  │
+│  └──────────────┘  └──────────────┘  └───────────────┘  └────────┘  │
+│  ┌──────────────┐  ┌──────────────┐  ┌───────────────┐  ┌────────┐  │
+│  │ Service Chat │  │ Service      │  │ Service       │  │ Service │  │
+│  │ WebSocket    │  │ Appels Vidéo │  │ Équipes Film  │  │ Pub     │  │
+│  └──────────────┘  └──────────────┘  └───────────────┘  └────────┘  │
+└───────────┬─────────────────────────────────┬───────────────────────┘
+            │                                 │
+            ▼                                 ▼
+┌─────────────────────────┐  ┌─────────────────────────────────────────┐
+│      Base de données    │  │          Services externes               │
+│  ┌──────────────────┐   │  │  ┌──────────┐  ┌────────────────────┐   │
+│  │ PostgreSQL       │   │  │  │ CDN      │  │ Passerelles de     │   │
+│  │ (données         │   │  │  │ vidéo    │  │ paiement           │   │
+│  │ relationnelles)  │   │  │  │          │  │ (Mobile money, etc)│   │
+│  └──────────────────┘   │  │  └──────────┘  └────────────────────┘   │
+│                         │  │  ┌──────────┐  ┌────────────────────┐   │
+│                         │  │  │ Serveurs │  │ Serveurs TURN/STUN │   │
+│                         │  │  │ médias   │  │ (WebRTC)           │   │
+│                         │  │  └──────────┘  └────────────────────┘   │
+└─────────────────────────┘  └─────────────────────────────────────────┘
+```
+
+### 1.2 Stack technologique recommandée
+
+#### Frontend
+- **Framework principal**: Next.js (React)
+- **Styles**: Tailwind CSS
+- **Gestion d'état**: Redux Toolkit ou Zustand
+- **Lecteur vidéo**: VideoJS ou Plyr (avec DRM si nécessaire)
+- **Interface utilisateur**: Interface responsive avec design système africain
+- **PWA**: Service workers pour expérience hors ligne limitée
+- **Communication temps réel**: Socket.io ou client WebSocket
+- **Appels vidéo**: WebRTC avec adaptateur pour les environnements à faible bande passante
+- **Affichage publicitaire**: Module personnalisé avec suivi des impressions et clics
+
+#### Backend
+- **Framework**: Node.js avec Express ou NestJS
+- **API**: RESTful ou GraphQL (Apollo Server)
+- **WebSockets**: Socket.io ou ws pour les conversations en temps réel
+- **Authentification**: JWT avec OAuth2 multi-provider
+- **Base de données**: PostgreSQL
+- **ORM**: Prisma ou TypeORM
+- **Serveur WebRTC**: MediaSoup ou Janus
+- **Tests**: Jest, Supertest
+
+#### Infrastructure
+- **CDN vidéo**: AWS S3 + CloudFront ou solution alternative adaptée à l'Afrique
+- **Hébergement**: VPS ou cloud adaptés aux régions africaines (proximité Togo)
+- **CI/CD**: GitHub Actions ou GitLab CI
+- **Monitoring**: Sentry, PM2, Prometheus
+- **Caching**: Redis pour optimiser les performances
+- **Serveurs TURN/STUN**: coturn, adaptés aux contraintes réseau africaines
+
+## 2. Modèle de données
+
+### 2.1 Principales entités
+
+```
+┌───────────────┐       ┌───────────────┐       ┌───────────────┐
+│  Utilisateur  │       │    Film       │       │    Projet     │
+├───────────────┤       ├───────────────┤       ├───────────────┤
+│ id            │       │ id            │       │ id            │
+│ nom           │◄──────┤ titre         │◄──────┤ titre         │
+│ email         │       │ description   │       │ description   │
+│ mot_de_passe  │       │ durée         │       │ objectif      │
+│ type          │       │ date_sortie   │       │ montant_actuel│
+│ pays          │       │ genres        │       │ date_fin      │
+└───────┬───────┘       │ url_video     │       │ statut        │
+        │               │ réalisateur   │       │ film_associé  │
+        │               └───────────────┘       └───────┬───────┘
+        │                       ▲                      │
+        │                       │                      │
+        ▼                       │                      ▼
+┌───────────────┐       ┌───────────────┐       ┌───────────────┐
+│  Contribution │       │  Visionnage   │       │ Documentation │
+├───────────────┤       ├───────────────┤       ├───────────────┤
+│ id            │       │ id            │       │ id            │
+│ utilisateur_id│       │ utilisateur_id│       │ projet_id     │
+│ projet_id     │       │ film_id       │       │ type          │
+│ montant       │       │ progression   │       │ titre         │
+│ date          │       │ date          │       │ url_document  │
+│ statut        │       │ terminé       │       └───────────────┘
+│ transaction_id│       └───────────────┘
+└───────────────┘
+
+┌───────────────┐       ┌───────────────┐       ┌───────────────┐
+│ MembreEquipe  │       │ ChatMessage   │       │ AppelVideo    │
+├───────────────┤       ├───────────────┤       ├───────────────┤
+│ id            │       │ id            │       │ id            │
+│ film_id       │◄──────┤ film_id       │       │ demandeur_id  │
+│ utilisateur_id│       │ utilisateur_id│       │ membre_id     │
+│ role          │       │ contenu       │       │ film_id       │
+│ date_ajout    │       │ date          │       │ duree         │
+└───────────────┘       │ est_système   │       │ cout          │
+                        └───────────────┘       │ statut        │
+                                                └───────────────┘
+
+┌───────────────┐       ┌───────────────┐       ┌───────────────┐
+│  Campagne     │       │ Publicité     │       │ Impression    │
+├───────────────┤       ├───────────────┤       ├───────────────┤
+│ id            │       │ id            │       │ id            │
+│ annonceur_id  │◄──────┤ campagne_id   │◄──────┤ publicite_id  │
+│ nom           │       │ titre         │       │ date          │
+│ date_debut    │       │ emplacement   │       │ contexte      │
+│ date_fin      │       │ format        │       └───────────────┘
+│ budget        │       │ url_cible     │       
+│ statut        │       │ nb_impressions│       
+└───────────────┘       │ nb_clics      │       
+                        └───────────────┘       
+```
+
+### 2.2 Relations clés
+
+- Un **Utilisateur** peut être un spectateur, un réalisateur, un acteur ou une maison de production
+- Un **Film** est associé à un ou plusieurs **Projets** à financer
+- Un **Projet** contient des **Documents** (synopsis, fiche technique, préaffiche, etc.)
+- Un **Utilisateur** fait des **Contributions** à des **Projets**
+- Un **Utilisateur** a un historique de **Visionnages** de **Films**
+- Un **Film** a plusieurs **MembresEquipe** (acteurs, techniciens)
+- Un **Film** a plusieurs **ChatMessages** pour les discussions en temps réel
+- Un **Utilisateur** peut initier des **AppelsVideo** avec des **MembresEquipe**
+- Un **Annonceur** (Utilisateur) peut créer des **Campagnes** publicitaires
+- Une **Campagne** contient plusieurs **Publicités**
+- Les **Publicités** sont suivies via des **Impressions** et des **Clics**
+
+## 3. Fonctionnalités détaillées et étapes de développement
+
+### 3.1 Phase 1: Fonctionnalités de base (2-3 mois)
+
+#### Authentification et gestion des utilisateurs
+- Inscription et connexion sécurisées
+- Gestion des profils (spectateur, réalisateur, producteur)
+- Vérification d'email
+- Récupération de mot de passe
+- Tableaux de bord personnalisés selon le type d'utilisateur
+
+#### Catalogue de films et système de visionnage
+- Catalogue de films avec filtres avancés
+- Système de streaming adaptatif (différentes qualités selon la connexion)
+- Système de favoris et listes personnalisées
+- Historique de visionnage
+- Système de notation et commentaires
+
+#### Système de financement participatif
+- Création et soumission de projets de films
+- Système de validation des projets par l'administration
+- Intégration des passerelles de paiement (cartes bancaires, mobile money)
+- Tableaux de bord de suivi des financements
+- Système de notification des contributeurs
+
+### 3.2 Phase 2: Fonctionnalités sociales et équipes (2 mois)
+
+#### Gestion des équipes de film
+- Invitation des membres d'équipe via liens personnalisés
+- Profils pour les acteurs et techniciens
+- Association des membres d'équipe à plusieurs films
+- Recherche de talents parmi les membres inscrits
+- Interconnexion des profils entre différents projets
+
+#### Système de chat en ligne
+- Chat en temps réel entre public et équipe du film
+- Filtrage automatique des informations personnelles
+- Affichage des utilisateurs connectés
+- Historique des conversations
+- Notifications en temps réel
+
+#### Système d'appels vidéo
+- **Sessions individuelles payantes**
+  - Interface de demande d'appel vidéo
+  - Paiement sécurisé avant l'appel
+  - Établissement de la connexion WebRTC
+  - Gestion de la durée et fin automatique
+  - Répartition des revenus (plateforme, membre d'équipe, production)
+
+- **Sessions de groupe façon TikTok Live**
+  - Sessions programmées à l'avance avec réservations
+  - Diffusion du créateur vers plusieurs spectateurs
+  - Chat en temps réel intégré avec modération
+  - Messages épinglés et bannissement des utilisateurs
+  - Monétisation via paiement d'accès
+  - **Jeux d'émotions cinématographiques intégrés**
+  - **Filtres vidéo avec effets inspirés du cinéma**
+
+### 3.3 Phase 3: Monétisation et optimisations (2 mois)
+
+#### Système publicitaire
+- Interface de création de campagnes publicitaires
+- Gestion des emplacements et formats
+- Système de validation des publicités
+- Suivi des impressions et clics
+- Rapports de performance pour les annonceurs
+
+#### Optimisations et analyses avancées
+- Tableaux de bord d'analyse pour réalisateurs et producteurs
+- Statistiques d'engagement du public
+- Optimisations de performance pour les connexions faibles
+- Mode hors ligne pour certaines fonctionnalités
+- Améliorations basées sur les retours utilisateurs
+
+## 4. Intégrations spécifiques pour le marché africain
+
+### 4.1 Systèmes de paiement
+- **Mobile Money**: MTN Mobile Money, Flooz, Moov Money (essentiels au Togo)
+- **Cartes bancaires**: Intégration via Stripe ou solution régionale
+- **Portefeuilles numériques**: Intégration PayPal et solutions locales
+- **Paiements offline**: Génération de codes QR pour paiements en agence
+
+### 4.2 Optimisation pour environnement à faible connectivité
+- Préchargement intelligent des films
+- Réduction de qualité automatique selon la bande passante
+- Mode hors ligne pour certaines fonctionnalités
+- PWA pour expérience native légère
+- Optimisation des appels vidéo pour faible bande passante
+
+### 4.3 Multilinguisme
+- Interface en français (principale)
+- Support pour l'anglais (sélectionnable)
+- Potentiel support futur pour langues locales (Ewe, Kabyè, etc.)
+
+## 5. Considérations de sécurité
+
+### 5.1 Protection du contenu
+- DRM léger pour les films (si nécessaire)
+- Watermarking invisible avec identifiant de session
+- Mesures anti-enregistrement d'écran basiques
+- Limitation de sessions simultanées
+
+### 5.2 Sécurité des paiements
+- Conformité PCI-DSS pour les données de cartes
+- Tokenisation des informations sensibles
+- Chiffrement de bout en bout
+- Processus de vérification anti-fraude
+
+### 5.3 Protection des données
+- Mise en place RGPD/conformité locale
+- Chiffrement des données sensibles
+- Accès limité aux données personnelles
+- Politique de conservation claire
+- Filtrage automatique des informations personnelles dans le chat
+
+### 5.4 Sécurité des communications
+- Cryptage des conversations dans le chat
+- Sécurisation des appels vidéo (DTLS-SRTP)
+- Protection contre les abus (modération, signalements)
+- Limitation de débit pour prévenir les attaques DoS
+
+## 6. Plan de déploiement
+
+### 6.1 MVP (2-3 mois)
+- Système d'authentification
+- Catalogue de films basique
+- Lecture vidéo adaptative
+- Présentation des projets
+- Intégration d'au moins une solution de paiement (MTN Mobile Money)
+
+### 6.2 Phase 2 (2 mois supplémentaires)
+- Système complet de financement participatif
+- Gestion des équipes de film
+- Chat en ligne
+- Dashboard réalisateurs/producteurs
+- Améliorations UX/UI majeures
+
+### 6.3 Phase 3 (2-3 mois supplémentaires)
+- Système d'appels vidéo payants
+- Système publicitaire
+- Optimisations de performance
+- Applications mobiles (optionnel)
+- Intégrations marketing et SEO
+
+## 7. Estimation des coûts et ressources
+
+### 7.1 Équipe recommandée
+- 1 Chef de projet technique
+- 2 Développeurs full-stack
+- 1 Designer UI/UX
+- 1 Spécialiste backend/infrastructure
+- 1 Développeur spécialisé WebRTC/temps réel (pour phase 2)
+- Support QA à temps partiel
+
+### 7.2 Infrastructure mensuelle estimée
+- Hébergement serveur: 50-150€/mois
+- CDN et stockage vidéo: 100-500€/mois (selon volume)
+- Services tiers (monitoring, email, etc.): 50-100€/mois
+- Serveurs TURN/STUN pour WebRTC: 50-100€/mois
+- Frais de passerelles de paiement: Variables (% des transactions)
+
+### 7.3 Considérations spéciales
+- Partenariats potentiels avec des fournisseurs locaux
+- Optimisation des coûts pour le marché africain
+- Possibilité de modèle hybride (cloud + serveurs locaux)
+- Revenus publicitaires pour compenser les coûts d'infrastructure

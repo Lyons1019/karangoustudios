@@ -1,0 +1,68 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 800 600">
+  <!-- Background -->
+  <rect width="800" height="600" fill="#f8f9fa" />
+  
+  <!-- Header section with title -->
+  <rect x="0" y="0" width="800" height="50" fill="#252525" />
+  <text x="30" y="32" font-family="Arial" font-size="20" font-weight="bold" fill="white">Karangou Studios</text>
+  
+  <!-- Navigation -->
+  <rect x="400" y="0" width="400" height="50" fill="#252525" />
+  <text x="430" y="32" font-family="Arial" font-size="14" fill="white">Films</text>
+  <text x="500" y="32" font-family="Arial" font-size="14" fill="white">Projets</text>
+  <text x="570" y="32" font-family="Arial" font-size="14" fill="white">Communauté</text>
+  <text x="680" y="32" font-family="Arial" font-size="14" fill="white">Connexion</text>
+  
+  <!-- Hero Section -->
+  <rect x="30" y="80" width="740" height="200" rx="5" ry="5" fill="#3c3c3c" stroke="#ddd" />
+  <text x="400" y="150" font-family="Arial" font-size="24" font-weight="bold" fill="white" text-anchor="middle">Découvrez et Financez</text>
+  <text x="400" y="180" font-family="Arial" font-size="24" font-weight="bold" fill="white" text-anchor="middle">le Cinéma Africain</text>
+  <rect x="320" y="200" width="160" height="40" rx="20" ry="20" fill="#E67E22" />
+  <text x="400" y="225" font-family="Arial" font-size="16" fill="white" text-anchor="middle">Voir les films</text>
+  
+  <!-- Films Section Title -->
+  <text x="30" y="320" font-family="Arial" font-size="20" font-weight="bold" fill="#333">Films à l'affiche</text>
+  
+  <!-- Film Cards -->
+  <g>
+    <!-- Film 1 -->
+    <rect x="30" y="340" width="170" height="230" rx="5" ry="5" fill="white" stroke="#ddd" />
+    <rect x="30" y="340" width="170" height="120" fill="#666" />
+    <text x="115" y="400" font-family="Arial" font-size="12" fill="white" text-anchor="middle">Vignette Film</text>
+    <text x="40" y="480" font-family="Arial" font-size="14" font-weight="bold" fill="#333">Innocent malgré tout</text>
+    <text x="40" y="500" font-family="Arial" font-size="12" fill="#666">Kouamé M.S. CODJOVI</text>
+    <text x="40" y="520" font-family="Arial" font-size="12" fill="#666">Drame - 1h45</text>
+    <rect x="40" y="535" width="150" height="25" rx="12" ry="12" fill="#3498db" />
+    <text x="115" y="552" font-family="Arial" font-size="12" fill="white" text-anchor="middle">Regarder</text>
+    
+    <!-- Film 2 -->
+    <rect x="220" y="340" width="170" height="230" rx="5" ry="5" fill="white" stroke="#ddd" />
+    <rect x="220" y="340" width="170" height="120" fill="#666" />
+    <text x="305" y="400" font-family="Arial" font-size="12" fill="white" text-anchor="middle">Vignette Film</text>
+    <text x="230" y="480" font-family="Arial" font-size="14" font-weight="bold" fill="#333">Les enfants du soleil</text>
+    <text x="230" y="500" font-family="Arial" font-size="12" fill="#666">Abibou Mouktar</text>
+    <text x="230" y="520" font-family="Arial" font-size="12" fill="#666">Comédie - 2h10</text>
+    <rect x="230" y="535" width="150" height="25" rx="12" ry="12" fill="#3498db" />
+    <text x="305" y="552" font-family="Arial" font-size="12" fill="white" text-anchor="middle">Regarder</text>
+    
+    <!-- Film 3 -->
+    <rect x="410" y="340" width="170" height="230" rx="5" ry="5" fill="white" stroke="#ddd" />
+    <rect x="410" y="340" width="170" height="120" fill="#666" />
+    <text x="495" y="400" font-family="Arial" font-size="12" fill="white" text-anchor="middle">Vignette Film</text>
+    <text x="420" y="480" font-family="Arial" font-size="14" font-weight="bold" fill="#333">Chemins croisés</text>
+    <text x="420" y="500" font-family="Arial" font-size="12" fill="#666">Aïcha N'Diaye</text>
+    <text x="420" y="520" font-family="Arial" font-size="12" fill="#666">Thriller - 1h38</text>
+    <rect x="420" y="535" width="150" height="25" rx="12" ry="12" fill="#3498db" />
+    <text x="495" y="552" font-family="Arial" font-size="12" fill="white" text-anchor="middle">Regarder</text>
+    
+    <!-- Film 4 -->
+    <rect x="600" y="340" width="170" height="230" rx="5" ry="5" fill="white" stroke="#ddd" />
+    <rect x="600" y="340" width="170" height="120" fill="#666" />
+    <text x="685" y="400" font-family="Arial" font-size="12" fill="white" text-anchor="middle">Vignette Film</text>
+    <text x="610" y="480" font-family="Arial" font-size="14" font-weight="bold" fill="#333">Retour au village</text>
+    <text x="610" y="500" font-family="Arial" font-size="12" fill="#666">Kwame Mensah</text>
+    <text x="610" y="520" font-family="Arial" font-size="12" fill="#666">Documentaire - 1h25</text>
+    <rect x="610" y="535" width="150" height="25" rx="12" ry="12" fill="#3498db" />
+    <text x="685" y="552" font-family="Arial" font-size="12" fill="white" text-anchor="middle">Regarder</text>
+  </g>
+</svg>

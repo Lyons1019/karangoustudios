@@ -1,0 +1,1149 @@
+// Fichier: server/services/videoCall/videoFilters.js
+
+const { PrismaClient } = require('@prisma/client');
+const prisma = new PrismaClient();
+
+/**
+ * Service de gestion des filtres vidéo et émotions cinématographiques
+ * Permet aux utilisateurs d'appliquer des filtres inspirés du cinéma pendant les appels vidéo
+ */
+class VideoFiltersService {
+  constructor() {
+    // Catégories de filtres disponibles
+    this.filterCategories = {
+      EMOTION: 'emotion',          // Filtres d'émotions (joie, tristesse, colère, etc.)
+      GENRE: 'genre',              // Filtres inspirés de genres cinématographiques
+      LIGHTING: 'lighting',        // Filtres d'éclairage (film noir, golden hour, etc.)
+      SPECIAL_EFFECT: 'effect',    // Effets spéciaux (explosions, pluie, neige, etc.)
+      VINTAGE: 'vintage',          // Filtres d'époques du cinéma
+      CHARACTER: 'character'       // Accessoires de personnages célèbres
+    };
+    
+    // Initialisation de la bibliothèque de filtres
+    this.initializeFilters();
+    
+    // Map pour suivre les filtres actifs par session et par utilisateur
+    this.activeFilters = new Map();
+  }
+
+  /**
+   * Initialise la bibliothèque des filtres disponibles
+   */
+  async initializeFilters() {
+    // Vérifier si des filtres existent déjà en base de données
+    const existingFilters = await prisma.videoFilter.count();
+    
+    // Si des filtres existent déjà, ne pas réinitialiser
+    if (existingFilters > 0) {
+      return;
+    }
+    
+    // Définition des filtres d'émotions
+    const emotionFilters = [
+      {
+        name: 'Joie Éclatante',
+        category: this.filterCategories.EMOTION,
+        description: 'Lumière vive et dorée, inspirée des moments de bonheur au cinéma',
+        technicalParams: JSON.stringify({
+          brightness: 1.2,
+          contrast: 1.1,
+          saturation: 1.3,
+          warmth: 1.2,
+          overlay: 'sun_flare'
+        }),
+        assetUrl: '/assets/filters/joy_filter.webp',
+        thumbnailUrl: '/assets/filters/thumbnails/joy_thumb.jpg',
+        popularity: 5
+      },
+      {
+        name: 'Tristesse Bleue',
+        category: this.filterCategories.EMOTION,
+        description: 'Teinte bleue mélancolique, comme dans les scènes dramatiques',
+        technicalParams: JSON.stringify({
+          brightness: 0.9,
+          contrast: 1.1,
+          saturation: 0.8,
+          colorShift: 'blue',
+          vignette: 0.3
+        }),
+        assetUrl: '/assets/filters/sadness_filter.webp',
+        thumbnailUrl: '/assets/filters/thumbnails/sadness_thumb.jpg',
+        popularity: 4
+      },
+      {
+        name: 'Colère Rouge',
+        category: this.filterCategories.EMOTION,
+        description: 'Teinte rougeâtre intense, comme dans les scènes de confrontation',
+        technicalParams: JSON.stringify({
+          brightness: 1.1,
+          contrast: 1.2,
+          saturation: 1.2,
+          colorShift: 'red',
+          vignette: 0.4,
+          shake: { intensity: 0.2, speed: 0.5 }
+        }),
+        assetUrl: '/assets/filters/anger_filter.webp',
+        thumbnailUrl: '/assets/filters/thumbnails/anger_thumb.jpg',
+        popularity: 4
+      },
+      {
+        name: 'Nostalgie Sépia',
+        category: this.filterCategories.EMOTION,
+        description: 'Filtre sépia chaleureux pour les moments de nostalgie',
+        technicalParams: JSON.stringify({
+          brightness: 1.05,
+          contrast: 1.1,
+          saturation: 0.7,
+          sepia: 0.8,
+          grainAmount: 0.2
+        }),
+        assetUrl: '/assets/filters/nostalgia_filter.webp',
+        thumbnailUrl: '/assets/filters/thumbnails/nostalgia_thumb.jpg',
+        popularity: 3
+      },
+      {
+        name: 'Peur Nocturne',
+        category: this.filterCategories.EMOTION,
+        description: 'Filtre sombre et contrasté comme dans les films d\'horreur',
+        technicalParams: JSON.stringify({
+          brightness: 0.7,
+          contrast: 1.4,
+          saturation: 0.6,
+          vignette: 0.7,
+          noise: 0.3,
+          flicker: { intensity: 0.2, speed: 0.3 }
+        }),
+        assetUrl: '/assets/filters/fear_filter.webp',
+        thumbnailUrl: '/assets/filters/thumbnails/fear_thumb.jpg',
+        popularity: 5
+      }
+    ];
+    
+    // Définition des filtres de genre cinématographique
+    const genreFilters = [
+      {
+        name: 'Film Noir',
+        category: this.filterCategories.GENRE,
+        description: 'Noir et blanc contrasté, ombres dramatiques des films policiers des années 40',
+        technicalParams: JSON.stringify({
+          grayscale: 1.0,
+          contrast: 1.5,
+          brightness: 0.9,
+          vignette: 0.5,
+          shadowIntensity: 1.3
+        }),
+        assetUrl: '/assets/filters/film_noir.webp',
+        thumbnailUrl: '/assets/filters/thumbnails/noir_thumb.jpg',
+        popularity: 4
+      },
+      {
+        name: 'Western',
+        category: this.filterCategories.GENRE,
+        description: 'Teintes désertiques et poussiéreuses du Far West',
+        technicalParams: JSON.stringify({
+          brightness: 1.1,
+          contrast: 1.2,
+          saturation: 0.8,
+          colorTemperature: 'warm',
+          dustOverlay: 0.3,
+          grainAmount: 0.2
+        }),
+        assetUrl: '/assets/filters/western_filter.webp',
+        thumbnailUrl: '/assets/filters/thumbnails/western_thumb.jpg',
+        popularity: 3
+      },
+      {
+        name: 'Science-Fiction',
+        category: this.filterCategories.GENRE,
+        description: 'Teintes bleues futuristes et effets lumineux high-tech',
+        technicalParams: JSON.stringify({
+          brightness: 1.0,
+          contrast: 1.2,
+          saturation: 0.9,
+          colorShift: 'blue',
+          glowEdges: 0.3,
+          scanlines: 0.1,
+          digitalArtifacts: 0.1
+        }),
+        assetUrl: '/assets/filters/scifi_filter.webp',
+        thumbnailUrl: '/assets/filters/thumbnails/scifi_thumb.jpg',
+        popularity: 5
+      }
+    ];
+    
+    // Définition des filtres d'accessoires/personnages
+    const characterFilters = [
+      {
+        name: 'Chapeau Détective',
+        category: this.filterCategories.CHARACTER,
+        description: 'Chapeau fedora inspiré des détectives du film noir',
+        technicalParams: JSON.stringify({
+          facialAccessory: 'detective_hat',
+          position: 'head_top',
+          scale: 1.0,
+          rotation: 0
+        }),
+        assetUrl: '/assets/filters/detective_hat.webp',
+        thumbnailUrl: '/assets/filters/thumbnails/detective_hat_thumb.jpg',
+        popularity: 4
+      },
+      {
+        name: 'Larmes Dramatiques',
+        category: this.filterCategories.CHARACTER,
+        description: 'Larmes qui coulent, pour les moments mélodramatiques',
+        technicalParams: JSON.stringify({
+          facialEffect: 'tears',
+          intensity: 0.8,
+          position: 'eyes',
+          animated: true,
+          animationSpeed: 0.5
+        }),
+        assetUrl: '/assets/filters/dramatic_tears.webp',
+        thumbnailUrl: '/assets/filters/thumbnails/tears_thumb.jpg',
+        popularity: 5
+      },
+      {
+        name: 'Moustache de Star',
+        category: this.filterCategories.CHARACTER,
+        description: 'Moustache emblématique inspirée des stars du cinéma classique',
+        technicalParams: JSON.stringify({
+          facialAccessory: 'classic_mustache',
+          position: 'upper_lip',
+          scale: 1.0,
+          rotation: 0
+        }),
+        assetUrl: '/assets/filters/mustache.webp',
+        thumbnailUrl: '/assets/filters/thumbnails/mustache_thumb.jpg',
+        popularity: 3
+      }
+    ];
+    
+    // Définition des effets spéciaux
+    const specialEffects = [
+      {
+        name: 'Pluie Dramatique',
+        category: this.filterCategories.SPECIAL_EFFECT,
+        description: 'Effet de pluie qui tombe, parfait pour les scènes dramatiques',
+        technicalParams: JSON.stringify({
+          overlay: 'rain',
+          intensity: 0.7,
+          speed: 0.8,
+          dropSize: 0.3,
+          sound: 'rain_ambient'
+        }),
+        assetUrl: '/assets/filters/rain_effect.webp',
+        thumbnailUrl: '/assets/filters/thumbnails/rain_thumb.jpg',
+        popularity: 5
+      },
+      {
+        name: 'Explosion Action',
+        category: this.filterCategories.SPECIAL_EFFECT,
+        description: 'Effets d\'explosion en arrière-plan, comme dans les films d\'action',
+        technicalParams: JSON.stringify({
+          backgroundEffect: 'explosion',
+          intensity: 0.8,
+          animationDuration: 3,
+          sound: 'explosion',
+          shake: { intensity: 0.5, duration: 1 }
+        }),
+        assetUrl: '/assets/filters/explosion_effect.webp',
+        thumbnailUrl: '/assets/filters/thumbnails/explosion_thumb.jpg',
+        popularity: 5
+      }
+    ];
+    
+    // Fusionner tous les filtres
+    const allFilters = [
+      ...emotionFilters,
+      ...genreFilters,
+      ...characterFilters,
+      ...specialEffects
+    ];
+    
+    // Enregistrer les filtres en base de données
+    await prisma.videoFilter.createMany({
+      data: allFilters
+    });
+    
+    console.log(`${allFilters.length} filtres vidéo initialisés avec succès`);
+  }
+
+  /**
+   * Récupère tous les filtres disponibles par catégorie
+   * @returns {Promise<Object>} - Filtres organisés par catégorie
+   */
+  async getAvailableFilters() {
+    try {
+      // Récupérer tous les filtres de la base de données
+      const filters = await prisma.videoFilter.findMany({
+        orderBy: {
+          popularity: 'desc'
+        }
+      });
+      
+      // Organiser les filtres par catégorie
+      const filtersByCategory = {};
+      
+      Object.values(this.filterCategories).forEach(category => {
+        filtersByCategory[category] = filters.filter(filter => filter.category === category);
+      });
+      
+      return filtersByCategory;
+    } catch (error) {
+      console.error('Erreur lors de la récupération des filtres:', error);
+      throw new Error(`Échec de la récupération des filtres: ${error.message}`);
+    }
+  }
+
+  /**
+   * Applique un filtre à un utilisateur dans une session
+   * @param {string} sessionId - ID de la session (appel vidéo)
+   * @param {number} userId - ID de l'utilisateur
+   * @param {number} filterId - ID du filtre à appliquer
+   * @returns {Promise<Object>} - Détails du filtre appliqué
+   */
+  async applyFilter(sessionId, userId, filterId) {
+    try {
+      // Vérifier que le filtre existe
+      const filter = await prisma.videoFilter.findUnique({
+        where: { id: filterId }
+      });
+      
+      if (!filter) {
+        throw new Error('Filtre non trouvé');
+      }
+      
+      // Créer une entrée unique pour la session
+      const sessionKey = `${sessionId}`;
+      
+      // Initialiser la map pour cette session si nécessaire
+      if (!this.activeFilters.has(sessionKey)) {
+        this.activeFilters.set(sessionKey, new Map());
+      }
+      
+      // Enregistrer le filtre actif pour cet utilisateur
+      this.activeFilters.get(sessionKey).set(userId, {
+        filterId,
+        name: filter.name,
+        category: filter.category,
+        assetUrl: filter.assetUrl,
+        technicalParams: JSON.parse(filter.technicalParams),
+        appliedAt: new Date()
+      });
+      
+      // Enregistrer l'utilisation du filtre en base de données
+      await prisma.filterUsage.create({
+        data: {
+          userId,
+          filterId,
+          sessionType: 'group', // ou 'individual' pour les appels individuels
+          sessionId, 
+          appliedAt: new Date()
+        }
+      });
+      
+      return {
+        id: filter.id,
+        name: filter.name,
+        category: filter.category,
+        description: filter.description,
+        assetUrl: filter.assetUrl,
+        technicalParams: JSON.parse(filter.technicalParams)
+      };
+    } catch (error) {
+      console.error('Erreur lors de l\'application du filtre:', error);
+      throw new Error(`Échec de l'application du filtre: ${error.message}`);
+    }
+  }
+
+  /**
+   * Supprime le filtre actif d'un utilisateur
+   * @param {string} sessionId - ID de la session
+   * @param {number} userId - ID de l'utilisateur
+   * @returns {Promise<Object>} - Résultat de l'opération
+   */
+  async removeFilter(sessionId, userId) {
+    try {
+      const sessionKey = `${sessionId}`;
+      
+      // Vérifier si la session existe
+      if (!this.activeFilters.has(sessionKey)) {
+        return { success: true, message: 'Aucun filtre actif' };
+      }
+      
+      // Vérifier si l'utilisateur a un filtre actif
+      const sessionFilters = this.activeFilters.get(sessionKey);
+      
+      if (!sessionFilters.has(userId)) {
+        return { success: true, message: 'Aucun filtre actif pour cet utilisateur' };
+      }
+      
+      // Supprimer le filtre actif
+      sessionFilters.delete(userId);
+      
+      // Si aucun utilisateur n'a de filtre dans cette session, supprimer l'entrée de la session
+      if (sessionFilters.size === 0) {
+        this.activeFilters.delete(sessionKey);
+      }
+      
+      return {
+        success: true,
+        message: 'Filtre supprimé avec succès'
+      };
+    } catch (error) {
+      console.error('Erreur lors de la suppression du filtre:', error);
+      throw new Error(`Échec de la suppression du filtre: ${error.message}`);
+    }
+  }
+
+  /**
+   * Récupère les filtres actifs dans une session
+   * @param {string} sessionId - ID de la session
+   * @returns {Promise<Object>} - Map des filtres actifs par utilisateur
+   */
+  async getActiveSessionFilters(sessionId) {
+    try {
+      const sessionKey = `${sessionId}`;
+      
+      if (!this.activeFilters.has(sessionKey)) {
+        return {};
+      }
+      
+      // Convertir la Map en objet pour la réponse JSON
+      const activeFilters = {};
+      const sessionFilters = this.activeFilters.get(sessionKey);
+      
+      for (const [userId, filterData] of sessionFilters.entries()) {
+        activeFilters[userId] = filterData;
+      }
+      
+      return activeFilters;
+    } catch (error) {
+      console.error('Erreur lors de la récupération des filtres actifs:', error);
+      throw new Error(`Échec de la récupération des filtres actifs: ${error.message}`);
+    }
+  }
+
+  /**
+   * Récupère les filtres les plus populaires
+   * @param {number} limit - Nombre maximum de filtres à récupérer
+   * @returns {Promise<Array>} - Liste des filtres les plus populaires
+   */
+  async getPopularFilters(limit = 10) {
+    try {
+      // Récupérer les filtres les plus utilisés
+      const popularFilters = await prisma.filterUsage.groupBy({
+        by: ['filterId'],
+        _count: {
+          filterId: true
+        },
+        orderBy: {
+          _count: {
+            filterId: 'desc'
+          }
+        },
+        take: parseInt(limit)
+      });
+      
+      // Récupérer les détails des filtres
+      const filterIds = popularFilters.map(usage => usage.filterId);
+      
+      const filters = await prisma.videoFilter.findMany({
+        where: {
+          id: { in: filterIds }
+        }
+      });
+      
+      // Trier les filtres selon leur popularité
+      return filterIds.map(id => filters.find(filter => filter.id === id))
+        .filter(filter => filter !== undefined)
+        .map(filter => ({
+          ...filter,
+          technicalParams: JSON.parse(filter.technicalParams)
+        }));
+    } catch (error) {
+      console.error('Erreur lors de la récupération des filtres populaires:', error);
+      throw new Error(`Échec de la récupération des filtres populaires: ${error.message}`);
+    }
+  }
+
+  /**
+   * Crée un jeu d'émotions entre les participants
+   * @param {string} sessionId - ID de la session
+   * @param {number} initiatorId - ID de l'utilisateur qui initie le jeu
+   * @param {string} gameType - Type de jeu ('emotion_challenge', 'emotion_guess', etc.)
+   * @returns {Promise<Object>} - Détails du jeu créé
+   */
+  async startEmotionGame(sessionId, initiatorId, gameType) {
+    try {
+      // Vérifier que le type de jeu est valide
+      const validGameTypes = [
+        'emotion_challenge',  // Défi pour exprimer une émotion spécifique
+        'emotion_guess',      // Deviner l'émotion exprimée par un autre participant
+        'emotion_chain',      // Chaîne d'émotions (chacun doit suivre avec une émotion différente)
+        'emotion_mirror'      // Miroir d'émotions (imiter l'émotion de l'autre)
+      ];
+      
+      if (!validGameTypes.includes(gameType)) {
+        throw new Error('Type de jeu non valide');
+      }
+      
+      // Récupérer les filtres d'émotions disponibles
+      const emotionFilters = await prisma.videoFilter.findMany({
+        where: {
+          category: this.filterCategories.EMOTION
+        }
+      });
+      
+      if (emotionFilters.length === 0) {
+        throw new Error('Aucun filtre d\'émotion disponible');
+      }
+      
+      // Configurer le jeu selon son type
+      let gameConfig;
+      
+      switch (gameType) {
+        case 'emotion_challenge':
+          // Choisir une émotion aléatoire
+          const randomFilter = emotionFilters[Math.floor(Math.random() * emotionFilters.length)];
+          
+          gameConfig = {
+            type: gameType,
+            targetEmotion: randomFilter.name,
+            targetEmotionId: randomFilter.id,
+            durationSeconds: 30, // Durée du défi
+            participants: [initiatorId],
+            scores: {}
+          };
+          break;
+          
+        case 'emotion_guess':
+          gameConfig = {
+            type: gameType,
+            availableEmotions: emotionFilters.map(filter => ({
+              id: filter.id,
+              name: filter.name
+            })),
+            actorId: initiatorId, // La personne qui va exprimer l'émotion
+            guessers: [],         // Sera rempli quand d'autres participants rejoindront
+            secretEmotionId: null, // Sera défini quand l'acteur choisira une émotion
+            guesses: {},           // Enregistrera les suppositions des participants
+            correctGuessers: [],   // Participants qui ont deviné correctement
+            durationSeconds: 60,
+            status: 'waiting'      // 'waiting', 'active', 'completed'
+          };
+          break;
+          
+        case 'emotion_chain':
+          gameConfig = {
+            type: gameType,
+            availableEmotions: emotionFilters.map(filter => ({
+              id: filter.id,
+              name: filter.name
+            })),
+            participants: [initiatorId],
+            currentTurn: initiatorId,
+            usedEmotions: [],
+            turnDurationSeconds: 15,
+            status: 'waiting'
+          };
+          break;
+          
+        case 'emotion_mirror':
+          gameConfig = {
+            type: gameType,
+            leader: initiatorId,
+            followers: [],
+            currentEmotionId: null,
+            scores: {},
+            durationSeconds: 60,
+            status: 'waiting'
+          };
+          break;
+      }
+      
+      // Créer l'entrée de jeu dans la base de données
+      const game = await prisma.emotionGame.create({
+        data: {
+          sessionId,
+          initiatorId,
+          gameType,
+          status: 'active',
+          config: JSON.stringify(gameConfig),
+          startedAt: new Date()
+        }
+      });
+      
+      return {
+        id: game.id,
+        sessionId,
+        initiatorId,
+        gameType,
+        config: gameConfig,
+        startedAt: game.startedAt
+      };
+    } catch (error) {
+      console.error('Erreur lors du démarrage du jeu d\'émotions:', error);
+      throw new Error(`Échec du démarrage du jeu: ${error.message}`);
+    }
+  }
+
+  /**
+   * Permet à un utilisateur de rejoindre un jeu d'émotions en cours
+   * @param {number} gameId - ID du jeu
+   * @param {number} userId - ID de l'utilisateur
+   * @returns {Promise<Object>} - État mis à jour du jeu
+   */
+  async joinEmotionGame(gameId, userId) {
+    try {
+      // Récupérer le jeu
+      const game = await prisma.emotionGame.findUnique({
+        where: { id: gameId }
+      });
+      
+      if (!game) {
+        throw new Error('Jeu non trouvé');
+      }
+      
+      if (game.status !== 'active') {
+        throw new Error('Ce jeu n\'est plus actif');
+      }
+      
+      // Récupérer la configuration du jeu
+      const gameConfig = JSON.parse(game.config);
+      
+      // Mettre à jour la configuration selon le type de jeu
+      switch (gameConfig.type) {
+        case 'emotion_challenge':
+          if (!gameConfig.participants.includes(userId)) {
+            gameConfig.participants.push(userId);
+            gameConfig.scores[userId] = 0;
+          }
+          break;
+          
+        case 'emotion_guess':
+          if (userId !== gameConfig.actorId && !gameConfig.guessers.includes(userId)) {
+            gameConfig.guessers.push(userId);
+          }
+          break;
+          
+        case 'emotion_chain':
+          if (!gameConfig.participants.includes(userId)) {
+            gameConfig.participants.push(userId);
+          }
+          break;
+          
+        case 'emotion_mirror':
+          if (userId !== gameConfig.leader && !gameConfig.followers.includes(userId)) {
+            gameConfig.followers.push(userId);
+            gameConfig.scores[userId] = 0;
+          }
+          break;
+      }
+      
+      // Mettre à jour la configuration en base de données
+      await prisma.emotionGame.update({
+        where: { id: gameId },
+        data: {
+          config: JSON.stringify(gameConfig),
+          updatedAt: new Date()
+        }
+      });
+      
+      return {
+        id: gameId,
+        sessionId: game.sessionId,
+        gameType: game.gameType,
+        config: gameConfig,
+        startedAt: game.startedAt
+      };
+    } catch (error) {
+      console.error('Erreur lors de la participation au jeu d\'émotions:', error);
+      throw new Error(`Échec de la participation au jeu: ${error.message}`);
+    }
+  }
+
+  /**
+   * Exécute une action dans un jeu d'émotions
+   * @param {number} gameId - ID du jeu
+   * @param {number} userId - ID de l'utilisateur
+   * @param {string} action - Type d'action ('select_emotion', 'guess', 'submit_score', etc.)
+   * @param {Object} actionData - Données spécifiques à l'action
+   * @returns {Promise<Object>} - Résultat de l'action
+   */
+  async performGameAction(gameId, userId, action, actionData) {
+    try {
+      // Récupérer le jeu
+      const game = await prisma.emotionGame.findUnique({
+        where: { id: gameId }
+      });
+      
+      if (!game) {
+        throw new Error('Jeu non trouvé');
+      }
+      
+      if (game.status !== 'active') {
+        throw new Error('Ce jeu n\'est plus actif');
+      }
+      
+      // Récupérer et mettre à jour la configuration du jeu
+      const gameConfig = JSON.parse(game.config);
+      let gameUpdated = false;
+      
+      switch (action) {
+        case 'select_emotion':
+          // Sélectionner une émotion pour le jeu
+          if (!actionData.emotionId) {
+            throw new Error('ID de l\'émotion requis');
+          }
+          
+          // Vérifier que l'émotion existe
+          const emotion = await prisma.videoFilter.findUnique({
+            where: { id: actionData.emotionId }
+          });
+          
+          if (!emotion) {
+            throw new Error('Émotion non trouvée');
+          }
+          
+          // Mettre à jour selon le type de jeu
+          if (gameConfig.type === 'emotion_guess' && userId === gameConfig.actorId) {
+            gameConfig.secretEmotionId = actionData.emotionId;
+            gameConfig.status = 'active';
+            gameUpdated = true;
+            
+            // Appliquer automatiquement le filtre à l'acteur
+            await this.applyFilter(game.sessionId, userId, actionData.emotionId);
+          } else if (gameConfig.type === 'emotion_chain' && userId === gameConfig.currentTurn) {
+            // Vérifier que cette émotion n'a pas déjà été utilisée
+            if (gameConfig.usedEmotions.includes(actionData.emotionId)) {
+              throw new Error('Cette émotion a déjà été utilisée dans cette partie');
+            }
+            
+            gameConfig.usedEmotions.push(actionData.emotionId);
+            
+            // Passer au joueur suivant
+            const currentIndex = gameConfig.participants.indexOf(userId);
+            const nextIndex = (currentIndex + 1) % gameConfig.participants.length;
+            gameConfig.currentTurn = gameConfig.participants[nextIndex];
+            
+            gameUpdated = true;
+            
+            // Appliquer le filtre à l'utilisateur actuel
+            await this.applyFilter(game.sessionId, userId, actionData.emotionId);
+          } else if (gameConfig.type === 'emotion_mirror' && userId === gameConfig.leader) {
+            gameConfig.currentEmotionId = actionData.emotionId;
+            gameUpdated = true;
+            
+            // Appliquer le filtre au leader
+            await this.applyFilter(game.sessionId, userId, actionData.emotionId);
+          }
+          break;
+          
+        case 'guess':
+          // Faire une supposition dans le jeu de devinette
+          if (gameConfig.type !== 'emotion_guess') {
+            throw new Error('Action non valide pour ce type de jeu');
+          }
+          
+          if (userId === gameConfig.actorId) {
+            throw new Error('L\'acteur ne peut pas deviner');
+          }
+          
+          if (!gameConfig.guessers.includes(userId)) {
+            throw new Error('Vous ne participez pas à ce jeu');
+          }
+          
+          if (!actionData.emotionId) {
+            throw new Error('ID de l\'émotion requis');
+          }
+          
+          // Enregistrer la supposition
+          gameConfig.guesses[userId] = actionData.emotionId;
+          
+          // Vérifier si la supposition est correcte
+          if (actionData.emotionId === gameConfig.secretEmotionId) {
+            gameConfig.correctGuessers.push(userId);
+          }
+          
+          // Si tous les participants ont deviné, terminer le jeu
+          if (Object.keys(gameConfig.guesses).length === gameConfig.guessers.length) {
+            gameConfig.status = 'completed';
+          }
+          
+          gameUpdated = true;
+          break;
+          
+        case 'mirror':
+          // Imiter l'émotion du leader dans le jeu de miroir
+          if (gameConfig.type !== 'emotion_mirror') {
+            throw new Error('Action non valide pour ce type de jeu');
+          }
+          
+          if (userId === gameConfig.leader) {
+            throw new Error('Le leader ne peut pas s\'imiter lui-même');
+          }
+          
+          if (!gameConfig.followers.includes(userId)) {
+            throw new Error('Vous ne participez pas à ce jeu');
+          }
+          
+          if (!gameConfig.currentEmotionId) {
+            throw new Error('Le leader n\'a pas encore choisi d\'émotion');
+          }
+          
+          // Appliquer le même filtre que le leader
+          await this.applyFilter(game.sessionId, userId, gameConfig.currentEmotionId);
+          
+          // Incrémenter le score du participant
+          gameConfig.scores[userId] = (gameConfig.scores[userId] || 0) + 1;
+          gameUpdated = true;
+          break;
+          
+        case 'submit_score':
+          // Attribuer un score dans le challenge d'émotions
+          if (gameConfig.type !== 'emotion_challenge') {
+            throw new Error('Action non valide pour ce type de jeu');
+          }
+          
+          if (!actionData.targetUserId || !actionData.score) {
+            throw new Error('ID utilisateur cible et score requis');
+          }
+          
+          if (!gameConfig.participants.includes(actionData.targetUserId)) {
+            throw new Error('Cet utilisateur ne participe pas au défi');
+          }
+          
+          // Score entre 1 et 5
+          const score = Math.min(5, Math.max(1, parseInt(actionData.score)));
+          
+          // Ajouter le score au total de l'utilisateur
+          gameConfig.scores[actionData.targetUserId] = 
+            (gameConfig.scores[actionData.targetUserId] || 0) + score;
+          
+          gameUpdated = true;
+          break;
+          
+        case 'end_game':
+          // Terminer le jeu (généralement appelé par l'initiateur)
+          if (userId !== game.initiatorId) {
+            throw new Error('Seul l\'initiateur du jeu peut le terminer');
+          }
+          
+          // Déterminer le gagnant selon le type de jeu
+          let winners = [];
+          
+          switch (gameConfig.type) {
+            case 'emotion_challenge':
+            case 'emotion_mirror':
+              // Le gagnant est celui avec le score le plus élevé
+              const maxScore = Math.max(...Object.values(gameConfig.scores));
+              winners = Object.entries(gameConfig.scores)
+                .filter(([_, score]) => score === maxScore)
+                .map(([userId, _]) => parseInt(userId));
+              break;
+              
+            case 'emotion_guess':
+              // Les gagnants sont ceux qui ont deviné correctement
+              winners = gameConfig.correctGuessers;
+              break;
+              
+            case 'emotion_chain':
+              // Tous les participants qui ont complété la chaîne sont gagnants
+              winners = gameConfig.participants;
+              break;
+          }
+          
+          // Mettre à jour la configuration
+          gameConfig.status = 'completed';
+          gameConfig.winners = winners;
+          gameUpdated = true;
+          
+          // Mettre à jour le statut du jeu en base de données
+          await prisma.emotionGame.update({
+            where: { id: gameId },
+            data: {
+              status: 'completed',
+              endedAt: new Date()
+            }
+          });
+          break;
+      }
+      
+      // Si la configuration a été mise à jour, l'enregistrer
+      if (gameUpdated) {
+        await prisma.emotionGame.update({
+          where: { id: gameId },
+          data: {
+            config: JSON.stringify(gameConfig),
+            updatedAt: new Date()
+          }
+        });
+      }
+      
+      return {
+        id: gameId,
+        sessionId: game.sessionId,
+        gameType: game.gameType,
+        config: gameConfig,
+        action: action,
+        result: 'success'
+      };
+    } catch (error) {
+      console.error('Erreur lors de l\'exécution de l\'action de jeu:', error);
+      throw new Error(`Échec de l'action de jeu: ${error.message}`);
+    }
+  }
+
+  /**
+   * Récupère l'état actuel d'un jeu d'émotions
+   * @param {number} gameId - ID du jeu
+   * @returns {Promise<Object>} - État actuel du jeu
+   */
+  async getGameState(gameId) {
+    try {
+      // Récupérer le jeu
+      const game = await prisma.emotionGame.findUnique({
+        where: { id: gameId }
+      });
+      
+      if (!game) {
+        throw new Error('Jeu non trouvé');
+      }
+      
+      // Récupérer les détails des participants
+      const gameConfig = JSON.parse(game.config);
+      
+      // Récupérer les détails des émotions si nécessaire
+      if (gameConfig.availableEmotions) {
+        const emotionIds = gameConfig.availableEmotions.map(e => e.id);
+        
+        const emotions = await prisma.videoFilter.findMany({
+          where: {
+            id: { in: emotionIds }
+          }
+        });
+        
+        gameConfig.availableEmotions = emotions.map(emotion => ({
+          id: emotion.id,
+          name: emotion.name,
+          description: emotion.description,
+          thumbnailUrl: emotion.thumbnailUrl
+        }));
+      }
+      
+      // Récupérer des informations sur les participants
+      let participantIds = [];
+      
+      switch (gameConfig.type) {
+        case 'emotion_challenge':
+        case 'emotion_chain':
+          participantIds = gameConfig.participants;
+          break;
+          
+        case 'emotion_guess':
+          participantIds = [gameConfig.actorId, ...gameConfig.guessers];
+          break;
+          
+        case 'emotion_mirror':
+          participantIds = [gameConfig.leader, ...gameConfig.followers];
+          break;
+      }
+      
+      if (participantIds.length > 0) {
+        const users = await prisma.user.findMany({
+          where: {
+            id: { in: participantIds }
+          },
+          select: {
+            id: true,
+            name: true,
+            profilePictureUrl: true
+          }
+        });
+        
+        gameConfig.participantsInfo = users.reduce((acc, user) => {
+          acc[user.id] = user;
+          return acc;
+        }, {});
+      }
+      
+      return {
+        id: game.id,
+        sessionId: game.sessionId,
+        initiatorId: game.initiatorId,
+        gameType: game.gameType,
+        status: game.status,
+        config: gameConfig,
+        startedAt: game.startedAt,
+        endedAt: game.endedAt
+      };
+    } catch (error) {
+      console.error('Erreur lors de la récupération de l\'état du jeu:', error);
+      throw new Error(`Échec de la récupération de l'état du jeu: ${error.message}`);
+    }
+  }
+
+  /**
+   * Crée un nouveau filtre personnalisé (réservé aux administrateurs)
+   * @param {Object} filterData - Données du filtre à créer
+   * @param {number} creatorId - ID de l'utilisateur créateur (admin)
+   * @returns {Promise<Object>} - Filtre créé
+   */
+  async createCustomFilter(filterData, creatorId) {
+    try {
+      // Vérifier que l'utilisateur est administrateur
+      const admin = await prisma.user.findFirst({
+        where: {
+          id: creatorId,
+          type: 'admin'
+        }
+      });
+      
+      if (!admin) {
+        throw new Error('Seuls les administrateurs peuvent créer des filtres personnalisés');
+      }
+      
+      // Valider les données du filtre
+      if (!filterData.name || !filterData.category || !filterData.technicalParams) {
+        throw new Error('Nom, catégorie et paramètres techniques requis');
+      }
+      
+      // Vérifier que la catégorie est valide
+      if (!Object.values(this.filterCategories).includes(filterData.category)) {
+        throw new Error(`Catégorie invalide. Les catégories valides sont: ${Object.values(this.filterCategories).join(', ')}`);
+      }
+      
+      // Créer le filtre
+      const filter = await prisma.videoFilter.create({
+        data: {
+          name: filterData.name,
+          category: filterData.category,
+          description: filterData.description || '',
+          technicalParams: typeof filterData.technicalParams === 'string' 
+            ? filterData.technicalParams 
+            : JSON.stringify(filterData.technicalParams),
+          assetUrl: filterData.assetUrl || '',
+          thumbnailUrl: filterData.thumbnailUrl || '',
+          popularity: filterData.popularity || 1,
+          createdBy: creatorId,
+          createdAt: new Date()
+        }
+      });
+      
+      return {
+        id: filter.id,
+        name: filter.name,
+        category: filter.category,
+        description: filter.description,
+        technicalParams: JSON.parse(filter.technicalParams),
+        assetUrl: filter.assetUrl,
+        thumbnailUrl: filter.thumbnailUrl,
+        popularity: filter.popularity,
+        createdAt: filter.createdAt
+      };
+    } catch (error) {
+      console.error('Erreur lors de la création du filtre personnalisé:', error);
+      throw new Error(`Échec de la création du filtre: ${error.message}`);
+    }
+  }
+
+  /**
+   * Génère des statistiques sur l'utilisation des filtres
+   * @param {string} period - Période d'analyse ('day', 'week', 'month', 'all')
+   * @returns {Promise<Object>} - Statistiques d'utilisation
+   */
+  async getFilterUsageStats(period = 'all') {
+    try {
+      // Déterminer la date de début selon la période
+      let startDate = null;
+      const now = new Date();
+      
+      switch (period) {
+        case 'day':
+          startDate = new Date(now);
+          startDate.setDate(startDate.getDate() - 1);
+          break;
+          
+        case 'week':
+          startDate = new Date(now);
+          startDate.setDate(startDate.getDate() - 7);
+          break;
+          
+        case 'month':
+          startDate = new Date(now);
+          startDate.setMonth(startDate.getMonth() - 1);
+          break;
+          
+        case 'all':
+        default:
+          // Pas de date de début, prendre toutes les données
+          break;
+      }
+      
+      // Construire la condition de filtrage
+      let where = {};
+      
+      if (startDate) {
+        where.appliedAt = {
+          gte: startDate
+        };
+      }
+      
+      // Récupérer les statistiques d'utilisation par filtre
+      const usageByFilter = await prisma.filterUsage.groupBy({
+        by: ['filterId'],
+        _count: {
+          filterId: true
+        },
+        where
+      });
+      
+      // Récupérer les détails des filtres
+      const filterIds = usageByFilter.map(usage => usage.filterId);
+      
+      const filters = await prisma.videoFilter.findMany({
+        where: {
+          id: { in: filterIds }
+        }
+      });
+      
+      // Fusionner les données
+      const filterStats = usageByFilter.map(usage => {
+        const filter = filters.find(f => f.id === usage.filterId);
+        
+        return {
+          id: usage.filterId,
+          name: filter ? filter.name : 'Filtre inconnu',
+          category: filter ? filter.category : 'unknown',
+          usageCount: usage._count.filterId
+        };
+      });
+      
+      // Statistiques par catégorie
+      const usageByCategory = await prisma.filterUsage.groupBy({
+        by: ['filter.category'],
+        _count: {
+          id: true
+        },
+        where
+      });
+      
+      // Statistiques globales
+      const totalUsage = await prisma.filterUsage.count({ where });
+      
+      return {
+        period,
+        totalUsage,
+        topFilters: filterStats.sort((a, b) => b.usageCount - a.usageCount),
+        categoryBreakdown: usageByCategory
+      };
+    } catch (error) {
+      console.error('Erreur lors de la génération des statistiques d\'utilisation des filtres:', error);
+      throw new Error(`Échec de la génération des statistiques: ${error.message}`);
+    }
+  }
+}
+
+// Exporter une instance unique du service
+module.exports = new VideoFiltersService();          

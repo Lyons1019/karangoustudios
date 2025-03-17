@@ -1,0 +1,203 @@
+// Fichier: prisma/schema.prisma
+
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+// Modèle Utilisateur
+model User {
+  id                Int            @id @default(autoincrement())
+  email             String         @unique
+  name              String
+  password          String
+  type              String         // "viewer", "director", "producer"
+  country           String?
+  bio               String?
+  profilePictureUrl String?
+  createdAt         DateTime       @default(now())
+  updatedAt         DateTime       @updatedAt
+  isVerified        Boolean        @default(false)
+  isActive          Boolean        @default(true)
+  
+  // Relations
+  films             Film[]         // Films créés (pour les réalisateurs/producteurs)
+  projects          Project[]      // Projets soumis
+  comments          Comment[]      // Commentaires sur les films
+  filmViewings      FilmViewing[]  // Historique de visionnage
+  contributions     Contribution[] // Contributions aux projets
+  notifications     Notification[] // Notifications de l'utilisateur
+}
+
+// Modèle Film
+model Film {
+  id              Int           @id @default(autoincrement())
+  title           String
+  description     String        @db.Text
+  synopsis        String        @db.Text
+  director        String
+  duration        Int           // En minutes
+  releaseDate     DateTime
+  genres          String        // Séparés par des virgules
+  posterUrl       String?
+  videoUrl        String
+  trailerUrl      String?
+  viewCount       Int           @default(0)
+  averageRating   Float?
+  createdAt       DateTime      @default(now())
+  updatedAt       DateTime      @updatedAt
+  isActive        Boolean       @default(true)
+  creatorId       Int
+  
+  // Relations
+  creator         User          @relation(fields: [creatorId], references: [id])
+  projects        Project[]     // Projets associés à ce film
+  comments        Comment[]     // Commentaires sur le film
+  filmViewings    FilmViewing[] // Historique de visionnage
+}
+
+// Modèle Projet
+model Project {
+  id              Int               @id @default(autoincrement())
+  title           String
+  description     String            @db.Text
+  synopsis        String            @db.Text
+  genre           String
+  posterUrl       String?
+  targetAmount    Float
+  currentAmount   Float             @default(0)
+  startDate       DateTime          @default(now())
+  endDate         DateTime
+  status          String            // "pending", "active", "funded", "completed", "cancelled"
+  createdAt       DateTime          @default(now())
+  updatedAt       DateTime          @updatedAt
+  userId          Int
+  associatedFilmId Int?
+  
+  // Relations
+  user            User              @relation(fields: [userId], references: [id])
+  associatedFilm  Film?             @relation(fields: [associatedFilmId], references: [id])
+  documents       ProjectDocument[] // Documents liés au projet
+  contributions   Contribution[]    // Contributions reçues
+  updates         ProjectUpdate[]   // Mises à jour du projet
+}
+
+// Modèle Document Projet
+model ProjectDocument {
+  id          Int      @id @default(autoincrement())
+  projectId   Int
+  title       String
+  type        String   // "synopsis", "technical", "poster", "other"
+  fileUrl     String
+  createdAt   DateTime @default(now())
+  
+  // Relations
+  project     Project  @relation(fields: [projectId], references: [id])
+}
+
+// Modèle Mise à jour Projet
+model ProjectUpdate {
+  id          Int      @id @default(autoincrement())
+  projectId   Int
+  title       String
+  content     String   @db.Text
+  imageUrl    String?
+  createdAt   DateTime @default(now())
+  
+  // Relations
+  project     Project  @relation(fields: [projectId], references: [id])
+}
+
+// Modèle Contribution
+model Contribution {
+  id            Int      @id @default(autoincrement())
+  userId        Int
+  projectId     Int
+  amount        Float
+  paymentMethod String   // "mobile_money", "card", "bank_transfer"
+  transactionId String?
+  status        String   // "pending", "completed", "failed"
+  message       String?
+  isAnonymous   Boolean  @default(false)
+  createdAt     DateTime @default(now())
+  
+  // Relations
+  user          User     @relation(fields: [userId], references: [id])
+  project       Project  @relation(fields: [projectId], references: [id])
+}
+
+// Modèle Visionnage Film
+model FilmViewing {
+  id          Int       @id @default(autoincrement())
+  userId      Int
+  filmId      Int
+  progress    Float     // Pourcentage de progression
+  completed   Boolean   @default(false)
+  createdAt   DateTime  @default(now())
+  updatedAt   DateTime  @updatedAt
+  
+  // Relations
+  user        User      @relation(fields: [userId], references: [id])
+  film        Film      @relation(fields: [filmId], references: [id])
+}
+
+// Modèle Commentaire
+model Comment {
+  id          Int       @id @default(autoincrement())
+  userId      Int
+  filmId      Int
+  content     String    @db.Text
+  rating      Int?      // Note sur 5
+  createdAt   DateTime  @default(now())
+  
+  // Relations
+  user        User      @relation(fields: [userId], references: [id])
+  film        Film      @relation(fields: [filmId], references: [id])
+}
+
+// Modèle Transaction de Paiement
+model PaymentTransaction {
+  id             Int       @id @default(autoincrement())
+  transactionId  String    @unique
+  userId         Int
+  projectId      Int
+  amount         Float
+  currency       String    @default("XOF") // FCFA par défaut
+  method         String    // "mobile_money", "card", "bank_transfer"
+  provider       String?   // "mtn", "moov", "flooz", "visa", etc.
+  phoneNumber    String?   // Pour mobile money
+  status         String    // "pending", "completed", "failed", "refunded"
+  errorMessage   String?
+  createdAt      DateTime  @default(now())
+  updatedAt      DateTime  @updatedAt
+}
+
+// Modèle Notification
+model Notification {
+  id          Int       @id @default(autoincrement())
+  userId      Int
+  type        String    // "contribution", "project_update", "comment", "system"
+  content     String
+  relatedId   Int?      // ID de l'objet concerné (projet, film, etc.)
+  isRead      Boolean   @default(false)
+  createdAt   DateTime  @default(now())
+  readAt      DateTime?
+  
+  // Relations
+  user        User      @relation(fields: [userId], references: [id])
+}
+
+// Modèle Page de Contenu (pour les pages statiques)
+model ContentPage {
+  id          Int       @id @default(autoincrement())
+  slug        String    @unique
+  title       String
+  content     String    @db.Text
+  createdAt   DateTime  @default(now())
+  updatedAt   DateTime  @updatedAt
+  isPublished Boolean   @default(true)
+}

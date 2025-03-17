@@ -1,0 +1,1545 @@
+// Fichier: server/services/videoCall/groupCalls.js
+
+const { PrismaClient } = require('@prisma/client');
+const jwt = require('jsonwebtoken');
+const { v4: uuidv4 } = require('uuid');
+const prisma = new PrismaClient();
+
+/**
+ * Service de gestion des appels vidéo de groupe pour Karangou Studios
+ * Permet la création de sessions avec plusieurs participants (façon TikTok Live)
+ */
+class GroupVideoCallService {
+  constructor() {
+    this.activeSessions = new Map(); // Map pour stocker les informations sur les sessions en cours
+    
+    // Configuration des prix et limites
+    this.pricing = {
+      basePrice: 20000, // 20,000 FCFA par heure pour une session de base
+      additionalViewerPrice: 2000, // 2,000 FCFA par heure pour chaque spectateur supplémentaire au-delà du minimum
+      minViewers: 5, // Nombre minimum de spectateurs (inclus dans le prix de base)
+      maxViewers: 50, // Nombre maximum de spectateurs par session
+      creatorShare: 70, // 70% pour le créateur de la session
+      filmShare: 10, // 10% pour la production du film
+      platformShare: 20 // 20% pour la plateforme
+    };
+    
+    // Intervalle de vérification des sessions actives (toutes les 60 secondes)
+    setInterval(() => this.monitorActiveSessions(), 60000);
+  }
+
+  /**
+   * Crée une nouvelle session d'appel vidéo de groupe
+   * @param {number} creatorId - ID du créateur (membre d'équipe)
+   * @param {number} filmId - ID du film associé
+   * @param {Object} sessionData - Données de la session
+   * @returns {Promise<Object>} - Détails de la session créée
+   */
+  async createGroupSession(creatorId, filmId, sessionData) {
+    try {
+      // Vérifier que le film existe
+      const film = await prisma.film.findUnique({
+        where: { id: filmId },
+        include: {
+          creator: true
+        }
+      });
+      
+      if (!film) {
+        throw new Error('Film non trouvé');
+      }
+      
+      // Vérifier que le créateur est membre de l'équipe du film
+      const isTeamMember = await prisma.filmTeamMember.findFirst({
+        where: {
+          filmId,
+          userId: creatorId
+        }
+      });
+      
+      const isFilmCreator = film.creatorId === creatorId;
+      
+      if (!isTeamMember && !isFilmCreator) {
+        throw new Error('Vous devez être membre de l\'équipe du film pour créer une session de groupe');
+      }
+      
+      // Vérifier que le créateur n'a pas déjà une session active
+      const existingSession = await prisma.groupVideoSession.findFirst({
+        where: {
+          creatorId,
+          status: {
+            in: ['scheduled', 'active']
+          }
+        }
+      });
+      
+      if (existingSession) {
+        throw new Error('Vous avez déjà une session programmée ou active');
+      }
+      
+      // Valider les données de la session
+      if (!sessionData.title || !sessionData.scheduledStartTime) {
+        throw new Error('Titre et heure de début requis');
+      }
+      
+      // S'assurer que l'heure de début est dans le futur
+      const scheduledStart = new Date(sessionData.scheduledStartTime);
+      const now = new Date();
+      
+      if (scheduledStart < now) {
+        throw new Error('L\'heure de début doit être dans le futur');
+      }
+      
+      // Calculer le prix de base en fonction de la durée
+      const durationMinutes = sessionData.durationMinutes || 60; // 1 heure par défaut
+      const basePrice = (this.pricing.basePrice / 60) * durationMinutes;
+      
+      // Générer un identifiant unique pour la session
+      const roomId = uuidv4();
+      
+      // Créer la session en base de données
+      const session = await prisma.groupVideoSession.create({
+        data: {
+          creatorId,
+          filmId,
+          title: sessionData.title,
+          description: sessionData.description || null,
+          roomId,
+          scheduledStartTime: scheduledStart,
+          scheduledDuration: durationMinutes,
+          maxViewers: sessionData.maxViewers || this.pricing.maxViewers,
+          viewerPrice: sessionData.viewerPrice || Math.round(basePrice / this.pricing.minViewers),
+          status: 'scheduled',
+          createdAt: new Date()
+        },
+        include: {
+          creator: {
+            select: {
+              id: true,
+              name: true,
+              type: true,
+              profilePictureUrl: true
+            }
+          },
+          film: {
+            select: {
+              id: true,
+              title: true,
+              posterUrl: true
+            }
+          }
+        }
+      });
+      
+      return {
+        id: session.id,
+        title: session.title,
+        description: session.description,
+        creator: session.creator,
+        film: session.film,
+        scheduledStartTime: session.scheduledStartTime,
+        scheduledDuration: session.scheduledDuration,
+        maxViewers: session.maxViewers,
+        viewerPrice: session.viewerPrice,
+        status: session.status,
+        roomId: session.roomId
+      };
+    } catch (error) {
+      console.error('Erreur lors de la création de la session de groupe:', error);
+      throw new Error(`Échec de la création de la session: ${error.message}`);
+    }
+  }
+
+  /**
+   * Démarre une session d'appel vidéo de groupe
+   * @param {number} sessionId - ID de la session
+   * @param {number} creatorId - ID du créateur (membre d'équipe)
+   * @returns {Promise<Object>} - Détails de la session démarrée
+   */
+  async startGroupSession(sessionId, creatorId) {
+    try {
+      // Vérifier que la session existe et appartient au créateur
+      const session = await prisma.groupVideoSession.findFirst({
+        where: {
+          id: sessionId,
+          creatorId
+        },
+        include: {
+          creator: {
+            select: {
+              id: true,
+              name: true,
+              type: true,
+              profilePictureUrl: true
+            }
+          },
+          film: {
+            select: {
+              id: true,
+              title: true,
+              posterUrl: true
+            }
+          }
+        }
+      });
+      
+      if (!session) {
+        throw new Error('Session non trouvée ou non autorisée');
+      }
+      
+      // Vérifier que la session est en état "scheduled"
+      if (session.status !== 'scheduled') {
+        throw new Error(`Impossible de démarrer une session en état "${session.status}"`);
+      }
+      
+      // Générer un token pour le créateur
+      const creatorToken = this.generateSessionToken(
+        sessionId,
+        creatorId,
+        'creator',
+        session.roomId
+      );
+      
+      // Mettre à jour la session
+      const updatedSession = await prisma.groupVideoSession.update({
+        where: { id: sessionId },
+        data: {
+          status: 'active',
+          startedAt: new Date(),
+          updatedAt: new Date()
+        }
+      });
+      
+      // Stocker les informations de la session dans la map
+      this.activeSessions.set(sessionId, {
+        id: sessionId,
+        roomId: session.roomId,
+        creatorId,
+        filmId: session.filmId,
+        title: session.title,
+        maxViewers: session.maxViewers,
+        startedAt: updatedSession.startedAt,
+        scheduledDuration: session.scheduledDuration,
+        viewerPrice: session.viewerPrice,
+        viewers: {},
+        messages: []
+      });
+      
+      // Notifier les utilisateurs qui ont préréservé (si implémenté)
+      this.notifyReservationHolders(sessionId);
+      
+      return {
+        id: sessionId,
+        roomId: session.roomId,
+        title: session.title,
+        description: session.description,
+        creator: session.creator,
+        film: session.film,
+        status: updatedSession.status,
+        startedAt: updatedSession.startedAt,
+        scheduledDuration: session.scheduledDuration,
+        creatorToken
+      };
+    } catch (error) {
+      console.error('Erreur lors du démarrage de la session de groupe:', error);
+      throw new Error(`Échec du démarrage de la session: ${error.message}`);
+    }
+  }
+
+  /**
+   * Rejoint une session d'appel vidéo de groupe en tant que spectateur
+   * @param {number} sessionId - ID de la session
+   * @param {number} viewerId - ID du spectateur
+   * @param {string} paymentId - ID du paiement (si applicable)
+   * @returns {Promise<Object>} - Informations d'accès à la session
+   */
+  async joinGroupSession(sessionId, viewerId, paymentId = null) {
+    try {
+      // Vérifier que la session existe
+      const session = await prisma.groupVideoSession.findUnique({
+        where: { id: sessionId },
+        include: {
+          creator: {
+            select: {
+              id: true,
+              name: true,
+              type: true,
+              profilePictureUrl: true
+            }
+          },
+          film: {
+            select: {
+              id: true,
+              title: true,
+              posterUrl: true
+            }
+          }
+        }
+      });
+      
+      if (!session) {
+        throw new Error('Session non trouvée');
+      }
+      
+      // Vérifier que la session est active
+      if (session.status !== 'active') {
+        throw new Error(`Cette session n'est pas active (statut: ${session.status})`);
+      }
+      
+      // Récupérer les informations de la session active
+      const activeSession = this.activeSessions.get(sessionId);
+      
+      if (!activeSession) {
+        throw new Error('Session non disponible');
+      }
+      
+      // Vérifier que la session n'a pas atteint le nombre maximum de spectateurs
+      const currentViewerCount = Object.keys(activeSession.viewers).length;
+      
+      if (currentViewerCount >= session.maxViewers) {
+        throw new Error('La session a atteint sa capacité maximale');
+      }
+      
+      // Vérifier si le spectateur a déjà payé
+      let viewerSession = await prisma.groupSessionViewer.findFirst({
+        where: {
+          sessionId,
+          viewerId,
+          status: 'paid'
+        }
+      });
+      
+      // Si pas de session existante et pas de paiement fourni, vérifier la nécessité de payer
+      if (!viewerSession && !paymentId) {
+        // Si le spectateur est le créateur du film, pas besoin de payer
+        const isFilmCreator = session.film.creatorId === viewerId;
+        
+        if (!isFilmCreator) {
+          throw new Error('Paiement requis pour rejoindre cette session');
+        }
+      }
+      
+      // Si un paymentId est fourni, créer ou mettre à jour la session du spectateur
+      if (paymentId) {
+        if (viewerSession) {
+          // Mettre à jour la session existante
+          viewerSession = await prisma.groupSessionViewer.update({
+            where: { id: viewerSession.id },
+            data: {
+              paymentId,
+              updatedAt: new Date()
+            }
+          });
+        } else {
+          // Créer une nouvelle session pour le spectateur
+          viewerSession = await prisma.groupSessionViewer.create({
+            data: {
+              sessionId,
+              viewerId,
+              paymentId,
+              joinedAt: new Date(),
+              status: 'paid',
+              createdAt: new Date()
+            }
+          });
+        }
+      } else if (!viewerSession) {
+        // Créer une session gratuite (pour le créateur du film ou cas spéciaux)
+        viewerSession = await prisma.groupSessionViewer.create({
+          data: {
+            sessionId,
+            viewerId,
+            joinedAt: new Date(),
+            status: 'free',
+            createdAt: new Date()
+          }
+        });
+      }
+      
+      // Générer un token pour le spectateur
+      const viewerToken = this.generateSessionToken(
+        sessionId,
+        viewerId,
+        'viewer',
+        session.roomId
+      );
+      
+      // Ajouter le spectateur à la session active
+      activeSession.viewers[viewerId] = {
+        id: viewerId,
+        joinedAt: new Date(),
+        status: viewerSession.status
+      };
+      
+      // Récupérer l'utilisateur
+      const viewer = await prisma.user.findUnique({
+        where: { id: viewerId },
+        select: {
+          id: true,
+          name: true,
+          profilePictureUrl: true
+        }
+      });
+      
+      // Ajouter un message système annonçant l'arrivée du spectateur
+      activeSession.messages.push({
+        type: 'system',
+        content: `${viewer.name} a rejoint la session`,
+        timestamp: new Date()
+      });
+      
+      return {
+        id: sessionId,
+        roomId: session.roomId,
+        title: session.title,
+        creator: session.creator,
+        film: session.film,
+        currentViewers: Object.keys(activeSession.viewers).length,
+        maxViewers: session.maxViewers,
+        startedAt: session.startedAt,
+        viewerToken,
+        messages: activeSession.messages.slice(-20) // Envoyer les 20 derniers messages
+      };
+    } catch (error) {
+      console.error('Erreur lors de la connexion à la session de groupe:', error);
+      throw new Error(`Échec de la connexion à la session: ${error.message}`);
+    }
+  }
+
+  /**
+   * Envoie un message dans une session de groupe
+   * @param {number} sessionId - ID de la session
+   * @param {number} userId - ID de l'utilisateur
+   * @param {string} content - Contenu du message
+   * @returns {Promise<Object>} - Message envoyé
+   */
+  async sendSessionMessage(sessionId, userId, content) {
+    try {
+      // Vérifier que la session existe
+      const session = await prisma.groupVideoSession.findUnique({
+        where: { id: sessionId }
+      });
+      
+      if (!session) {
+        throw new Error('Session non trouvée');
+      }
+      
+      // Vérifier que la session est active
+      if (session.status !== 'active') {
+        throw new Error('Impossible d\'envoyer un message à une session inactive');
+      }
+      
+      // Récupérer les informations de la session active
+      const activeSession = this.activeSessions.get(sessionId);
+      
+      if (!activeSession) {
+        throw new Error('Session non disponible');
+      }
+      
+      // Vérifier que l'utilisateur est dans la session
+      const isCreator = userId === session.creatorId;
+      const isViewer = activeSession.viewers[userId] !== undefined;
+      
+      if (!isCreator && !isViewer) {
+        throw new Error('Vous n\'êtes pas participant à cette session');
+      }
+      
+      // Filtrer le contenu du message (similaire au service de chat)
+      const filteredContent = this.filterMessage(content);
+      
+      // Récupérer les informations de l'utilisateur
+      const user = await prisma.user.findUnique({
+        where: { id: userId },
+        select: {
+          id: true,
+          name: true,
+          type: true,
+          profilePictureUrl: true
+        }
+      });
+      
+      // Créer le message en base de données
+      const message = await prisma.groupSessionMessage.create({
+        data: {
+          sessionId,
+          userId,
+          content: filteredContent,
+          createdAt: new Date()
+        }
+      });
+      
+      // Ajouter le message à la session active
+      const formattedMessage = {
+        id: message.id,
+        type: 'user',
+        userId,
+        userName: user.name,
+        userRole: isCreator ? 'creator' : 'viewer',
+        userProfilePicture: user.profilePictureUrl,
+        content: filteredContent,
+        timestamp: message.createdAt
+      };
+      
+      activeSession.messages.push(formattedMessage);
+      
+      // Limiter le nombre de messages en mémoire (garder les 500 derniers)
+      if (activeSession.messages.length > 500) {
+        activeSession.messages = activeSession.messages.slice(-500);
+      }
+      
+      return formattedMessage;
+    } catch (error) {
+      console.error('Erreur lors de l\'envoi du message:', error);
+      throw new Error(`Échec de l'envoi du message: ${error.message}`);
+    }
+  }
+
+  /**
+   * Termine une session de groupe
+   * @param {number} sessionId - ID de la session
+   * @param {number} creatorId - ID du créateur
+   * @returns {Promise<Object>} - Détails de la session terminée
+   */
+  async endGroupSession(sessionId, creatorId) {
+    try {
+      // Vérifier que la session existe et appartient au créateur
+      const session = await prisma.groupVideoSession.findFirst({
+        where: {
+          id: sessionId,
+          creatorId
+        }
+      });
+      
+      if (!session) {
+        throw new Error('Session non trouvée ou non autorisée');
+      }
+      
+      // Vérifier que la session est active
+      if (session.status !== 'active') {
+        throw new Error('Cette session n\'est pas active');
+      }
+      
+      const now = new Date();
+      
+      // Calculer la durée réelle de la session
+      const duration = Math.round((now - new Date(session.startedAt)) / (1000 * 60));
+      
+      // Récupérer les informations de la session active
+      const activeSession = this.activeSessions.get(sessionId);
+      
+      // Compter les spectateurs payants
+      const viewerCount = activeSession ? Object.values(activeSession.viewers).filter(v => v.status === 'paid').length : 0;
+      
+      // Calculer les revenus générés
+      const revenue = viewerCount * session.viewerPrice;
+      
+      // Calculer la répartition des revenus
+      const creatorShare = revenue * (this.pricing.creatorShare / 100);
+      const filmShare = revenue * (this.pricing.filmShare / 100);
+      const platformShare = revenue * (this.pricing.platformShare / 100);
+      
+      // Mettre à jour la session
+      const updatedSession = await prisma.groupVideoSession.update({
+        where: { id: sessionId },
+        data: {
+          status: 'completed',
+          endedAt: now,
+          actualDuration: duration,
+          viewerCount,
+          revenue,
+          creatorShare,
+          filmShare,
+          platformShare,
+          updatedAt: now
+        }
+      });
+      
+      // Supprimer la session de la map des sessions actives
+      this.activeSessions.delete(sessionId);
+      
+      return {
+        id: sessionId,
+        status: 'completed',
+        startedAt: session.startedAt,
+        endedAt: now,
+        duration,
+        viewerCount,
+        revenue,
+        shares: {
+          creator: creatorShare,
+          film: filmShare,
+          platform: platformShare
+        }
+      };
+    } catch (error) {
+      console.error('Erreur lors de la terminaison de la session de groupe:', error);
+      throw new Error(`Échec de la terminaison de la session: ${error.message}`);
+    }
+  }
+
+  /**
+   * Quitte une session de groupe en tant que spectateur
+   * @param {number} sessionId - ID de la session
+   * @param {number} viewerId - ID du spectateur
+   * @returns {Promise<Object>} - Résultat de l'opération
+   */
+  async leaveGroupSession(sessionId, viewerId) {
+    try {
+      // Vérifier que la session existe
+      const session = await prisma.groupVideoSession.findUnique({
+        where: { id: sessionId }
+      });
+      
+      if (!session) {
+        throw new Error('Session non trouvée');
+      }
+      
+      // Récupérer les informations de la session active
+      const activeSession = this.activeSessions.get(sessionId);
+      
+      // Si la session est encore active, supprimer le spectateur
+      if (activeSession && activeSession.viewers[viewerId]) {
+        delete activeSession.viewers[viewerId];
+        
+        // Récupérer l'utilisateur
+        const viewer = await prisma.user.findUnique({
+          where: { id: viewerId },
+          select: {
+            id: true,
+            name: true
+          }
+        });
+        
+        // Ajouter un message système annonçant le départ du spectateur
+        activeSession.messages.push({
+          type: 'system',
+          content: `${viewer.name} a quitté la session`,
+          timestamp: new Date()
+        });
+      }
+      
+      // Mettre à jour la session du spectateur en base de données
+      await prisma.groupSessionViewer.updateMany({
+        where: {
+          sessionId,
+          viewerId,
+          leftAt: null
+        },
+        data: {
+          leftAt: new Date(),
+          updatedAt: new Date()
+        }
+      });
+      
+      return {
+        success: true,
+        message: 'Session quittée avec succès'
+      };
+    } catch (error) {
+      console.error('Erreur lors du départ de la session de groupe:', error);
+      throw new Error(`Échec du départ de la session: ${error.message}`);
+    }
+  }
+
+  /**
+   * Récupère les sessions actives ou programmées
+   * @param {Object} options - Options de filtrage et pagination
+   * @returns {Promise<Object>} - Liste des sessions paginée
+   */
+  async getUpcomingSessions({ page = 1, limit = 20, filmId = null }) {
+    try {
+      const skip = (page - 1) * limit;
+      
+      // Construire la condition de filtrage
+      let where = {
+        status: {
+          in: ['scheduled', 'active']
+        }
+      };
+      
+      // Filtrer par film si spécifié
+      if (filmId) {
+        where.filmId = parseInt(filmId);
+      }
+      
+      const [sessions, total] = await Promise.all([
+        prisma.groupVideoSession.findMany({
+          where,
+          orderBy: [
+            { status: 'asc' }, // D'abord les sessions actives, puis les programmées
+            { scheduledStartTime: 'asc' } // Puis par ordre chronologique
+          ],
+          skip,
+          take: parseInt(limit),
+          include: {
+            creator: {
+              select: {
+                id: true,
+                name: true,
+                type: true,
+                profilePictureUrl: true
+              }
+            },
+            film: {
+              select: {
+                id: true,
+                title: true,
+                posterUrl: true
+              }
+            },
+            _count: {
+              select: {
+                viewers: true
+              }
+            }
+          }
+        }),
+        prisma.groupVideoSession.count({ where })
+      ]);
+      
+      // Ajouter les informations en temps réel pour les sessions actives
+      const formattedSessions = sessions.map(session => {
+        const activeSession = this.activeSessions.get(session.id);
+        
+        // Nombre de spectateurs actuels pour les sessions actives
+        const currentViewers = activeSession ? Object.keys(activeSession.viewers).length : 0;
+        
+        return {
+          id: session.id,
+          title: session.title,
+          description: session.description,
+          creator: session.creator,
+          film: session.film,
+          status: session.status,
+          scheduledStartTime: session.scheduledStartTime,
+          scheduledDuration: session.scheduledDuration,
+          startedAt: session.startedAt,
+          viewerPrice: session.viewerPrice,
+          maxViewers: session.maxViewers,
+          reservationCount: session._count.viewers,
+          currentViewers
+        };
+      });
+      
+      return {
+        data: formattedSessions,
+        pagination: {
+          total,
+          page: parseInt(page),
+          limit: parseInt(limit),
+          totalPages: Math.ceil(total / limit)
+        }
+      };
+    } catch (error) {
+      console.error('Erreur lors de la récupération des sessions:', error);
+      throw new Error(`Échec de la récupération des sessions: ${error.message}`);
+    }
+  }
+
+  /**
+   * Réserve une place dans une session programmée
+   * @param {number} sessionId - ID de la session
+   * @param {number} viewerId - ID du spectateur
+   * @param {string} paymentId - ID du paiement (facultatif)
+   * @returns {Promise<Object>} - Détails de la réservation
+   */
+  async reserveSessionSeat(sessionId, viewerId, paymentId = null) {
+    try {
+      // Vérifier que la session existe
+      const session = await prisma.groupVideoSession.findUnique({
+        where: { id: sessionId },
+        include: {
+          _count: {
+            select: {
+              viewers: true
+            }
+          }
+        }
+      });
+      
+      if (!session) {
+        throw new Error('Session non trouvée');
+      }
+      
+      // Vérifier que la session est programmée (pas encore démarrée)
+      if (session.status !== 'scheduled') {
+        throw new Error('Les réservations ne sont possibles que pour les sessions programmées');
+      }
+      
+      // Vérifier que la session n'a pas atteint le nombre maximum de réservations
+      if (session._count.viewers >= session.maxViewers) {
+        throw new Error('Cette session a atteint sa capacité maximale de réservations');
+      }
+      
+      // Vérifier si le spectateur a déjà une réservation
+      const existingReservation = await prisma.groupSessionViewer.findFirst({
+        where: {
+          sessionId,
+          viewerId
+        }
+      });
+      
+      if (existingReservation) {
+        throw new Error('Vous avez déjà réservé une place pour cette session');
+      }
+      
+      // Si un paiement est requis mais non fourni
+      if (!paymentId && session.viewerPrice > 0) {
+        // Vérifier si l'utilisateur est exempté de paiement (créateur du film, etc.)
+        const film = await prisma.film.findUnique({
+          where: { id: session.filmId }
+        });
+        
+        const isFilmCreator = film.creatorId === viewerId;
+        
+        if (!isFilmCreator) {
+          throw new Error('Paiement requis pour réserver une place');
+        }
+      }
+      
+      // Créer la réservation
+      const reservation = await prisma.groupSessionViewer.create({
+        data: {
+          sessionId,
+          viewerId,
+          paymentId,
+          status: paymentId ? 'paid' : 'free',
+          createdAt: new Date()
+        }
+      });
+      
+      return {
+        id: reservation.id,
+        sessionId,
+        viewerId,
+        status: reservation.status,
+        createdAt: reservation.createdAt,
+        sessionDetails: {
+          title: session.title,
+          scheduledStartTime: session.scheduledStartTime,
+          scheduledDuration: session.scheduledDuration
+        }
+      };
+    } catch (error) {
+      console.error('Erreur lors de la réservation:', error);
+      throw new Error(`Échec de la réservation: ${error.message}`);
+    }
+  }
+
+  /**
+   * Annule une réservation
+   * @param {number} sessionId - ID de la session
+   * @param {number} viewerId - ID du spectateur
+   * @returns {Promise<Object>} - Résultat de l'opération
+   */
+  async cancelReservation(sessionId, viewerId) {
+    try {
+      // Vérifier que la réservation existe
+      const reservation = await prisma.groupSessionViewer.findFirst({
+        where: {
+          sessionId,
+          viewerId
+        },
+        include: {
+          session: true
+        }
+      });
+      
+      if (!reservation) {
+        throw new Error('Réservation non trouvée');
+      }
+      
+      // Vérifier que la session n'a pas encore démarré
+      if (reservation.session.status !== 'scheduled') {
+        throw new Error('Impossible d\'annuler une réservation pour une session déjà démarrée');
+      }
+      
+      // Supprimer la réservation
+      await prisma.groupSessionViewer.delete({
+        where: {
+          id: reservation.id
+        }
+      });
+      
+      // Si la réservation était payante, prévoir un remboursement
+      if (reservation.status === 'paid' && reservation.paymentId) {
+        await prisma.refund.create({
+          data: {
+            userId: viewerId,
+            amount: reservation.session.viewerPrice,
+            reason: 'Annulation de réservation de session de groupe',
+            relatedEntityType: 'group_session',
+            relatedEntityId: sessionId,
+            paymentId: reservation.paymentId,
+            status: 'pending',
+            createdAt: new Date()
+          }
+        });
+      }
+      
+      return {
+        success: true,
+        message: 'Réservation annulée avec succès',
+        refundInitiated: reservation.status === 'paid'
+      };
+    } catch (error) {
+      console.error('Erreur lors de l\'annulation de la réservation:', error);
+      throw new Error(`Échec de l'annulation de la réservation: ${error.message}`);
+    }
+  }
+
+  /**
+   * Génère un token pour une session
+   * @param {number} sessionId - ID de la session
+   * @param {number} userId - ID de l'utilisateur
+   * @param {string} role - Rôle dans la session ('creator' ou 'viewer')
+   * @param {string} roomId - ID de la salle
+   * @returns {string} - Token de session
+   */
+  generateSessionToken(sessionId, userId, role, roomId) {
+    return jwt.sign(
+      { sessionId, userId, role, roomId },
+      process.env.GROUP_SESSION_SECRET || 'group-session-secret',
+      { expiresIn: '12h' }
+    );
+  }
+
+  /**
+   * Vérifie un token de session
+   * @param {string} token - Token à vérifier
+   * @returns {Object|null} - Données décodées ou null si invalide
+   */
+  verifySessionToken(token) {
+    try {
+      return jwt.verify(
+        token,
+        process.env.GROUP_SESSION_SECRET || 'group-session-secret'
+      );
+    } catch (error) {
+      console.error('Erreur de vérification du token de session:', error);
+      return null;
+    }
+  }
+
+  /**
+   * Filtre un message pour supprimer les informations personnelles
+   * @param {string} message - Message à filtrer
+   * @returns {string} - Message filtré
+   */
+  filterMessage(message) {
+    let filteredMessage = message;
+    
+    // Modèles de filtrage similaires au service de chat
+    const blockedPatterns = [
+      // Modèles de numéros de téléphone
+      /(?:\+?\d{2,3}[\s-]?)?\d{7,10}/g,
+      // Modèles d'emails
+      /[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}/g,
+      // Liens WhatsApp
+      /(?:https?:\/\/)?(?:www\.)?wa(?:\.me|pp\.com)\/(?:send\/?\?phone=|\+)?[\d\s]+/gi,
+      // Liens Facebook/Messenger
+      /(?:https?:\/\/)?(?:www\.)?(?:facebook|fb)\.(?:com|me)\/[\w.]+/gi,
+      // Liens vers des réseaux sociaux
+      /(?:https?:\/\/)?(?:www\.)?(?:instagram|twitter|tiktok|snapchat)\.com\/[\w.]+/gi
+    ];
+    
+    // Appliquer tous les filtres de pattern
+    blockedPatterns.forEach(pattern => {
+      filteredMessage = filteredMessage.replace(pattern, '***');
+    });
+    
+    return filteredMessage;
+  }
+
+  /**
+   * Notifie les détenteurs de réservation qu'une session a démarré
+   * @param {number} sessionId - ID de la session
+   */
+  async notifyReservationHolders(sessionId) {
+    try {
+      // Récupérer les réservations pour cette session
+      const reservations = await prisma.groupSessionViewer.findMany({
+        where: {
+          sessionId,
+          joinedAt: null,
+          leftAt: null
+        },
+        include: {
+          viewer: {
+            select: {
+              id: true,
+              name: true,
+              email: true
+            }
+          },
+          session: {
+            select: {
+              title: true
+            }
+          }
+        }
+      });
+      
+      // Dans un système réel, envoyer des notifications push, emails, etc.
+      for (const reservation of reservations) {
+        // Simuler l'envoi d'une notification
+        console.log(`Notification envoyée à ${reservation.viewer.name} (${reservation.viewer.email}) : La session "${reservation.session.title}" a démarré !`);
+        
+        // Créer une notification dans la base de données
+        await prisma.notification.create({
+          data: {
+            userId: reservation.viewer.id,
+            type: 'group_session_started',
+            content: `La session "${reservation.session.title}" a démarré ! Rejoignez-la maintenant.`,
+            relatedId: sessionId,
+            isRead: false,
+            createdAt: new Date()
+          }
+        });
+      }
+    } catch (error) {
+      console.error('Erreur lors de la notification des détenteurs de réservation:', error);
+    }
+  }
+
+  /**
+   * Surveille les sessions actives et gère les sessions expirées
+   */
+  async monitorActiveSessions() {
+    try {
+      const now = new Date();
+      
+      // Parcourir toutes les sessions actives
+      for (const [sessionId, sessionInfo] of this.activeSessions.entries()) {
+        // Vérifier si la session a dépassé sa durée prévue
+        if (sessionInfo.startedAt) {
+          const sessionDurationMs = now - new Date(sessionInfo.startedAt);
+          const sessionDurationMinutes = Math.floor(sessionDurationMs / (1000 * 60));
+          
+          // Si la session dure depuis plus longtemps que prévu (+ 15 minutes de grâce)
+          if (sessionDurationMinutes > sessionInfo.scheduledDuration + 15) {
+            console.log(`Session #${sessionId} a dépassé sa durée prévue, arrêt automatique`);
+            
+            try {
+              // Terminer automatiquement la session
+              await this.endGroupSession(sessionId, sessionInfo.creatorId);
+            } catch (error) {
+              console.error(`Erreur lors de l'arrêt automatique de la session #${sessionId}:`, error);
+            }
+          }
+        }
+      }
+      
+      // Rechercher les sessions programmées qui auraient dû démarrer mais sont toujours en attente
+      const missedSessions = await prisma.groupVideoSession.findMany({
+        where: {
+          status: 'scheduled',
+          scheduledStartTime: {
+            lt: new Date(now.getTime() - 30 * 60 * 1000) // 30 minutes de retard
+          }
+        }
+      });
+      
+      // Annuler les sessions manquées
+      for (const session of missedSessions) {
+        await prisma.groupVideoSession.update({
+          where: { id: session.id },
+          data: {
+            status: 'cancelled',
+            updatedAt: now,
+            cancellationReason: 'Session non démarrée à l\'heure prévue'
+          }
+        });
+        
+        console.log(`Session #${session.id} annulée automatiquement car non démarrée`);
+      }
+    } catch (error) {
+      console.error('Erreur lors de la surveillance des sessions actives:', error);
+    }
+  }
+
+  /**
+   * Bannit un spectateur d'une session
+   * @param {number} sessionId - ID de la session
+   * @param {number} creatorId - ID du créateur (qui effectue le bannissement)
+   * @param {number} viewerId - ID du spectateur à bannir
+   * @param {string} reason - Raison du bannissement
+   * @returns {Promise<Object>} - Résultat de l'opération
+   */
+  async banViewer(sessionId, creatorId, viewerId, reason = '') {
+    try {
+      // Vérifier que la session existe et appartient au créateur
+      const session = await prisma.groupVideoSession.findFirst({
+        where: {
+          id: sessionId,
+          creatorId
+        }
+      });
+      
+      if (!session) {
+        throw new Error('Session non trouvée ou non autorisée');
+      }
+      
+      // Vérifier que la session est active
+      if (session.status !== 'active') {
+        throw new Error('Impossible de bannir un spectateur d\'une session inactive');
+      }
+      
+      // Vérifier que le spectateur est dans la session
+      const activeSession = this.activeSessions.get(sessionId);
+      
+      if (!activeSession || !activeSession.viewers[viewerId]) {
+        throw new Error('Ce spectateur n\'est pas dans la session');
+      }
+      
+      // Supprimer le spectateur de la session active
+      delete activeSession.viewers[viewerId];
+      
+      // Mettre à jour la session du spectateur en base de données
+      await prisma.groupSessionViewer.updateMany({
+        where: {
+          sessionId,
+          viewerId,
+          leftAt: null
+        },
+        data: {
+          leftAt: new Date(),
+          status: 'banned',
+          banReason: reason,
+          updatedAt: new Date()
+        }
+      });
+      
+      // Ajouter une entrée de bannissement
+      await prisma.groupSessionBan.create({
+        data: {
+          sessionId,
+          viewerId,
+          reason,
+          createdAt: new Date()
+        }
+      });
+      
+      // Récupérer l'utilisateur
+      const viewer = await prisma.user.findUnique({
+        where: { id: viewerId },
+        select: {
+          id: true,
+          name: true
+        }
+      });
+      
+      // Ajouter un message système annonçant le bannissement
+      activeSession.messages.push({
+        type: 'system',
+        content: `${viewer.name} a été retiré de la session`,
+        timestamp: new Date()
+      });
+      
+      return {
+        success: true,
+        message: 'Spectateur banni avec succès'
+      };
+    } catch (error) {
+      console.error('Erreur lors du bannissement du spectateur:', error);
+      throw new Error(`Échec du bannissement: ${error.message}`);
+    }
+  }
+
+  /**
+   * Ajoute un modérateur à une session
+   * @param {number} sessionId - ID de la session
+   * @param {number} creatorId - ID du créateur
+   * @param {number} moderatorId - ID du modérateur à ajouter
+   * @returns {Promise<Object>} - Détails du modérateur ajouté
+   */
+  async addModerator(sessionId, creatorId, moderatorId) {
+    try {
+      // Vérifier que la session existe et appartient au créateur
+      const session = await prisma.groupVideoSession.findFirst({
+        where: {
+          id: sessionId,
+          creatorId
+        }
+      });
+      
+      if (!session) {
+        throw new Error('Session non trouvée ou non autorisée');
+      }
+      
+      // Vérifier que l'utilisateur existe
+      const moderator = await prisma.user.findUnique({
+        where: { id: moderatorId }
+      });
+      
+      if (!moderator) {
+        throw new Error('Utilisateur non trouvé');
+      }
+      
+      // Vérifier si l'utilisateur est déjà modérateur
+      const existingModerator = await prisma.groupSessionModerator.findFirst({
+        where: {
+          sessionId,
+          userId: moderatorId
+        }
+      });
+      
+      if (existingModerator) {
+        throw new Error('Cet utilisateur est déjà modérateur pour cette session');
+      }
+      
+      // Ajouter le modérateur
+      const moderatorEntry = await prisma.groupSessionModerator.create({
+        data: {
+          sessionId,
+          userId: moderatorId,
+          addedBy: creatorId,
+          createdAt: new Date()
+        }
+      });
+      
+      // Si la session est active, ajouter le modérateur à la liste des modérateurs
+      const activeSession = this.activeSessions.get(sessionId);
+      
+      if (activeSession) {
+        if (!activeSession.moderators) {
+          activeSession.moderators = {};
+        }
+        
+        activeSession.moderators[moderatorId] = {
+          id: moderatorId,
+          name: moderator.name,
+          addedAt: new Date()
+        };
+        
+        // Ajouter un message système
+        activeSession.messages.push({
+          type: 'system',
+          content: `${moderator.name} est maintenant modérateur de la session`,
+          timestamp: new Date()
+        });
+      }
+      
+      return {
+        id: moderatorEntry.id,
+        sessionId,
+        moderatorId,
+        moderatorName: moderator.name,
+        createdAt: moderatorEntry.createdAt
+      };
+    } catch (error) {
+      console.error('Erreur lors de l\'ajout du modérateur:', error);
+      throw new Error(`Échec de l'ajout du modérateur: ${error.message}`);
+    }
+  }
+
+  /**
+   * Épingle un message dans une session
+   * @param {number} sessionId - ID de la session
+   * @param {number} messageId - ID du message
+   * @param {number} userId - ID de l'utilisateur qui épingle (créateur ou modérateur)
+   * @returns {Promise<Object>} - Message épinglé
+   */
+  async pinMessage(sessionId, messageId, userId) {
+    try {
+      // Vérifier que la session existe
+      const session = await prisma.groupVideoSession.findUnique({
+        where: { id: sessionId }
+      });
+      
+      if (!session) {
+        throw new Error('Session non trouvée');
+      }
+      
+      // Vérifier que l'utilisateur est le créateur ou un modérateur
+      const isCreator = userId === session.creatorId;
+      const isModerator = await prisma.groupSessionModerator.findFirst({
+        where: {
+          sessionId,
+          userId
+        }
+      });
+      
+      if (!isCreator && !isModerator) {
+        throw new Error('Seuls le créateur et les modérateurs peuvent épingler des messages');
+      }
+      
+      // Récupérer le message
+      const message = await prisma.groupSessionMessage.findFirst({
+        where: {
+          id: messageId,
+          sessionId
+        },
+        include: {
+          user: {
+            select: {
+              id: true,
+              name: true,
+              profilePictureUrl: true
+            }
+          }
+        }
+      });
+      
+      if (!message) {
+        throw new Error('Message non trouvé');
+      }
+      
+      // Mettre à jour le statut d'épinglage du message
+      const updatedMessage = await prisma.groupSessionMessage.update({
+        where: { id: messageId },
+        data: {
+          isPinned: true,
+          pinnedBy: userId,
+          pinnedAt: new Date()
+        }
+      });
+      
+      // Si la session est active, mettre à jour le message épinglé
+      const activeSession = this.activeSessions.get(sessionId);
+      
+      if (activeSession) {
+        activeSession.pinnedMessage = {
+          id: message.id,
+          content: message.content,
+          userId: message.userId,
+          userName: message.user.name,
+          userProfilePicture: message.user.profilePictureUrl,
+          createdAt: message.createdAt,
+          pinnedBy: userId,
+          pinnedAt: updatedMessage.pinnedAt
+        };
+      }
+      
+      return {
+        id: messageId,
+        content: message.content,
+        user: message.user,
+        createdAt: message.createdAt,
+        isPinned: true,
+        pinnedBy: userId,
+        pinnedAt: updatedMessage.pinnedAt
+      };
+    } catch (error) {
+      console.error('Erreur lors de l\'épinglage du message:', error);
+      throw new Error(`Échec de l'épinglage du message: ${error.message}`);
+    }
+  }
+
+  /**
+   * Récupère les statistiques d'une session terminée
+   * @param {number} sessionId - ID de la session
+   * @param {number} userId - ID de l'utilisateur (créateur ou administrateur)
+   * @returns {Promise<Object>} - Statistiques détaillées
+   */
+  async getSessionStats(sessionId, userId) {
+    try {
+      // Vérifier que la session existe
+      const session = await prisma.groupVideoSession.findUnique({
+        where: { id: sessionId },
+        include: {
+          creator: {
+            select: {
+              id: true,
+              name: true
+            }
+          },
+          film: {
+            select: {
+              id: true,
+              title: true
+            }
+          }
+        }
+      });
+      
+      if (!session) {
+        throw new Error('Session non trouvée');
+      }
+      
+      // Vérifier que l'utilisateur est le créateur ou un administrateur
+      const isCreator = userId === session.creatorId;
+      const isAdmin = await prisma.user.findFirst({
+        where: {
+          id: userId,
+          type: 'admin'
+        }
+      });
+      
+      if (!isCreator && !isAdmin) {
+        throw new Error('Vous n\'êtes pas autorisé à voir les statistiques de cette session');
+      }
+      
+      // Récupérer les données des spectateurs
+      const viewers = await prisma.groupSessionViewer.findMany({
+        where: { sessionId },
+        include: {
+          viewer: {
+            select: {
+              id: true,
+              name: true
+            }
+          }
+        }
+      });
+      
+      // Récupérer les messages
+      const messages = await prisma.groupSessionMessage.count({
+        where: { sessionId }
+      });
+      
+      // Analyser les données des spectateurs
+      const viewerStats = {
+        total: viewers.length,
+        paid: viewers.filter(v => v.status === 'paid').length,
+        free: viewers.filter(v => v.status === 'free').length,
+        banned: viewers.filter(v => v.status === 'banned').length,
+        averageViewTime: viewers.filter(v => v.joinedAt && v.leftAt)
+          .reduce((sum, v) => sum + (new Date(v.leftAt) - new Date(v.joinedAt)), 0) / 
+          viewers.filter(v => v.joinedAt && v.leftAt).length / (1000 * 60) // en minutes
+      };
+      
+      // Préparer les données de la session
+      const sessionData = {
+        id: session.id,
+        title: session.title,
+        creator: session.creator,
+        film: session.film,
+        scheduledDuration: session.scheduledDuration,
+        actualDuration: session.actualDuration,
+        startedAt: session.startedAt,
+        endedAt: session.endedAt,
+        status: session.status,
+        revenue: session.revenue,
+        viewerPrice: session.viewerPrice,
+        shares: {
+          creator: session.creatorShare,
+          film: session.filmShare,
+          platform: session.platformShare
+        }
+      };
+      
+      return {
+        session: sessionData,
+        viewers: viewerStats,
+        messageCount: messages,
+        engagement: messages / Math.max(viewerStats.total, 1) // Messages par spectateur
+      };
+    } catch (error) {
+      console.error('Erreur lors de la récupération des statistiques de la session:', error);
+      throw new Error(`Échec de la récupération des statistiques: ${error.message}`);
+    }
+  }
+
+  /**
+   * Récupère les jeux d'émotions disponibles pour une session
+   * @param {number} sessionId - ID de la session
+   * @returns {Promise<Array>} - Liste des jeux d'émotions disponibles
+   */
+  async getAvailableEmotionGames(sessionId) {
+    try {
+      // Récupérer tous les jeux actifs pour cette session
+      const activeGames = await prisma.emotionGame.findMany({
+        where: {
+          sessionId,
+          status: 'active'
+        }
+      });
+      
+      // Si des jeux sont actifs, les retourner
+      if (activeGames.length > 0) {
+        return activeGames.map(game => ({
+          id: game.id,
+          gameType: game.gameType,
+          initiatorId: game.initiatorId,
+          config: JSON.parse(game.config),
+          startedAt: game.startedAt
+        }));
+      }
+      
+      // Sinon, retourner la liste des jeux disponibles
+      return [
+        {
+          type: 'emotion_challenge',
+          name: 'Défi d\'émotion',
+          description: 'Exprimez une émotion spécifique et recevez des points selon votre performance!',
+          minPlayers: 2,
+          maxPlayers: 10
+        },
+        {
+          type: 'emotion_guess',
+          name: 'Devinez l\'émotion',
+          description: 'Une personne exprime une émotion, les autres doivent deviner laquelle!',
+          minPlayers: 3,
+          maxPlayers: 15
+        },
+        {
+          type: 'emotion_chain',
+          name: 'Chaîne d\'émotions',
+          description: 'Chaque participant doit exprimer une émotion différente des précédentes!',
+          minPlayers: 3,
+          maxPlayers: 8
+        },
+        {
+          type: 'emotion_mirror',
+          name: 'Miroir d\'émotions',
+          description: 'Imitez parfaitement l\'émotion du leader pour gagner des points!',
+          minPlayers: 2,
+          maxPlayers: 10
+        }
+      ];
+    } catch (error) {
+      console.error('Erreur lors de la récupération des jeux disponibles:', error);
+      throw new Error(`Échec de la récupération des jeux: ${error.message}`);
+    }
+  }
+
+  /**
+   * Obtient des informations sur les filtres vidéo utilisés dans une session
+   * @param {number} sessionId - ID de la session
+   * @returns {Promise<Object>} - Information sur les filtres actifs par utilisateur
+   */
+  async getSessionVideoFilters(sessionId) {
+    try {
+      // Vérifier que la session existe
+      const activeSession = this.activeSessions.get(sessionId);
+      
+      if (!activeSession) {
+        throw new Error('Session non trouvée ou inactive');
+      }
+      
+      // Récupérer le service de filtres
+      const videoFiltersService = require('./videoFilters');
+      
+      // Obtenir les filtres actifs dans cette session
+      const activeFilters = await videoFiltersService.getActiveSessionFilters(sessionId);
+      
+      // Organiser les données par utilisateur
+      const result = {};
+      
+      // Pour le créateur
+      if (activeFilters[activeSession.creatorId]) {
+        result.creator = {
+          userId: activeSession.creatorId,
+          filter: activeFilters[activeSession.creatorId]
+        };
+      }
+      
+      // Pour les spectateurs
+      result.viewers = Object.keys(activeSession.viewers)
+        .filter(viewerId => activeFilters[viewerId])
+        .map(viewerId => ({
+          userId: parseInt(viewerId),
+          filter: activeFilters[viewerId]
+        }));
+      
+      return result;
+    } catch (error) {
+      console.error('Erreur lors de la récupération des filtres de session:', error);
+      throw new Error(`Échec de la récupération des filtres: ${error.message}`);
+    }
+  }
+}
+
+// Exporter une instance unique du service
+module.exports = new GroupVideoCallService();

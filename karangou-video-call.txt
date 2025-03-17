@@ -1,0 +1,964 @@
+// Fichier: server/services/videoCall/index.js
+
+const { PrismaClient } = require('@prisma/client');
+const jwt = require('jsonwebtoken');
+const { v4: uuidv4 } = require('uuid');
+const prisma = new PrismaClient();
+
+/**
+ * Service de gestion des appels vidéo payants pour Karangou Studios
+ * Permet aux utilisateurs d'initier des appels vidéo avec les membres de l'équipe d'un film
+ */
+class VideoCallService {
+  constructor() {
+    this.activeRooms = new Map(); // Map pour stocker les informations sur les appels en cours
+    this.callRates = {
+      director: 50000, // 50,000 FCFA par heure pour un réalisateur
+      producer: 45000, // 45,000 FCFA par heure pour un producteur
+      actor: 35000,    // 35,000 FCFA par heure pour un acteur
+      technician: 30000 // 30,000 FCFA par heure pour un technicien
+    };
+    
+    // Configuration de la répartition des revenus (en pourcentage)
+    this.revenueDistribution = {
+      platform: 15,    // 15% pour la plateforme
+      teamMember: 75,  // 75% pour le membre de l'équipe
+      production: 10   // 10% pour la production du film
+    };
+    
+    // Durée minimale d'un appel en minutes
+    this.minCallDuration = 15;
+    
+    // Intervalle de vérification des appels en cours (toutes les 10 secondes)
+    setInterval(() => this.monitorActiveCalls(), 10000);
+  }
+
+  /**
+   * Calcule le coût d'un appel vidéo
+   * @param {string} memberRole - Rôle du membre de l'équipe
+   * @param {number} durationMinutes - Durée de l'appel en minutes
+   * @returns {Object} - Détails du coût
+   */
+  calculateCallCost(memberRole, durationMinutes) {
+    // Utiliser le tarif standard si le rôle n'est pas spécifié
+    const hourlyRate = this.callRates[memberRole.toLowerCase()] || this.callRates.technician;
+    
+    // Calculer le coût pour la durée spécifiée (convertir en heures)
+    const cost = (hourlyRate / 60) * durationMinutes;
+    
+    // Répartition des revenus
+    const platformFee = cost * (this.revenueDistribution.platform / 100);
+    const teamMemberShare = cost * (this.revenueDistribution.teamMember / 100);
+    const productionShare = cost * (this.revenueDistribution.production / 100);
+    
+    return {
+      totalCost: cost,
+      durationMinutes,
+      hourlyRate,
+      distribution: {
+        platformFee,
+        teamMemberShare,
+        productionShare
+      }
+    };
+  }
+
+  /**
+   * Génère un jeton d'accès pour un appel vidéo
+   * @param {number} callId - ID de l'appel
+   * @param {number} userId - ID de l'utilisateur
+   * @param {string} userRole - Rôle de l'utilisateur
+   * @returns {string} - Jeton d'accès signé
+   */
+  generateCallToken(callId, userId, userRole) {
+    return jwt.sign(
+      { callId, userId, userRole },
+      process.env.VIDEO_CALL_SECRET || 'video-call-secret',
+      { expiresIn: '12h' }
+    );
+  }
+
+  /**
+   * Vérifie un jeton d'accès d'appel vidéo
+   * @param {string} token - Jeton à vérifier
+   * @returns {Object} - Données du jeton décodé ou null si invalide
+   */
+  verifyCallToken(token) {
+    try {
+      return jwt.verify(
+        token,
+        process.env.VIDEO_CALL_SECRET || 'video-call-secret'
+      );
+    } catch (error) {
+      console.error('Erreur de vérification du jeton d\'appel:', error);
+      return null;
+    }
+  }
+
+  /**
+   * Initie une demande d'appel vidéo
+   * @param {number} userId - ID de l'utilisateur qui demande l'appel
+   * @param {number} teamMemberId - ID du membre de l'équipe à appeler
+   * @param {number} filmId - ID du film associé
+   * @param {number} durationMinutes - Durée prévue de l'appel en minutes
+   * @returns {Promise<Object>} - Détails de la demande d'appel
+   */
+  async initiateCallRequest(userId, teamMemberId, filmId, durationMinutes) {
+    try {
+      // Vérifier que la durée est valide
+      if (durationMinutes < this.minCallDuration) {
+        throw new Error(`La durée minimale d'un appel est de ${this.minCallDuration} minutes`);
+      }
+      
+      // Vérifier que l'utilisateur et le membre d'équipe existent
+      const [user, teamMember] = await Promise.all([
+        prisma.user.findUnique({ where: { id: userId } }),
+        prisma.user.findUnique({ where: { id: teamMemberId } })
+      ]);
+      
+      if (!user) {
+        throw new Error('Utilisateur non trouvé');
+      }
+      
+      if (!teamMember) {
+        throw new Error('Membre d\'équipe non trouvé');
+      }
+      
+      // Vérifier que le membre d'équipe est bien associé au film
+      const filmTeamMember = await prisma.filmTeamMember.findFirst({
+        where: {
+          filmId,
+          userId: teamMemberId
+        }
+      });
+      
+      const isCreator = await prisma.film.findFirst({
+        where: {
+          id: filmId,
+          creatorId: teamMemberId
+        }
+      });
+      
+      if (!filmTeamMember && !isCreator) {
+        throw new Error('Ce membre d\'équipe n\'est pas associé à ce film');
+      }
+      
+      // Déterminer le rôle du membre d'équipe
+      let memberRole = teamMember.type;
+      
+      if (filmTeamMember) {
+        memberRole = filmTeamMember.role;
+      }
+      
+      // Calculer le coût de l'appel
+      const callCost = this.calculateCallCost(memberRole, durationMinutes);
+      
+      // Créer la demande d'appel en base de données
+      const callRequest = await prisma.videoCallRequest.create({
+        data: {
+          userId,
+        role: userRole,
+        joinedAt: new Date()
+      };
+      
+      // Si les deux participants sont présents, démarrer l'appel
+      if (Object.keys(activeRoom.participants).length === 2) {
+        // Démarrer l'appel s'il est en attente
+        if (activeRoom.status === 'waiting') {
+          activeRoom.status = 'active';
+          activeRoom.startedAt = new Date();
+          
+          // Mettre à jour l'état de l'appel en base de données
+          await prisma.videoCall.update({
+            where: { id: callId },
+            data: {
+              status: 'active',
+              startedAt: activeRoom.startedAt
+            }
+          });
+        }
+      }
+      
+      // Configuration des paramètres de l'appel
+      const callConfig = {
+        roomId: activeRoom.roomId,
+        callId,
+        status: activeRoom.status,
+        isCaller: userId === videoCall.userId,
+        isReceiver: userId === videoCall.teamMemberId,
+        participants: {
+          user: {
+            id: videoCall.user.id,
+            name: videoCall.user.name,
+            isConnected: !!activeRoom.participants[videoCall.user.id]
+          },
+          teamMember: {
+            id: videoCall.teamMember.id,
+            name: videoCall.teamMember.name,
+            role: videoCall.teamMember.type,
+            isConnected: !!activeRoom.participants[videoCall.teamMember.id]
+          }
+        },
+        durationMinutes: videoCall.scheduledDuration,
+        film: videoCall.film,
+        cost: videoCall.request.cost,
+        startedAt: activeRoom.startedAt,
+        joinedAt: activeRoom.participants[userId].joinedAt,
+        // Configuration spécifique à WebRTC (simulée ici)
+        iceServers: [
+          { urls: "stun:stun.karangou-studios.com:3478" },
+          {
+            urls: "turn:turn.karangou-studios.com:3478",
+            username: "karangou",
+            credential: "turnserver"
+          }
+        ]
+      };
+      
+      return callConfig;
+    } catch (error) {
+      console.error('Erreur lors de la connexion à l\'appel:', error);
+      throw new Error(`Échec de la connexion à l'appel: ${error.message}`);
+    }
+  }
+
+  /**
+   * Termine un appel vidéo
+   * @param {number} callId - ID de l'appel
+   * @param {number} userId - ID de l'utilisateur qui termine l'appel
+   * @returns {Promise<Object>} - Détails de l'appel terminé
+   */
+  async endCall(callId, userId) {
+    try {
+      // Vérifier que l'appel existe
+      const videoCall = await prisma.videoCall.findUnique({
+        where: { id: callId },
+        include: {
+          request: true
+        }
+      });
+      
+      if (!videoCall) {
+        throw new Error('Appel vidéo non trouvé');
+      }
+      
+      // Vérifier que l'utilisateur est autorisé à terminer l'appel
+      if (userId !== videoCall.userId && userId !== videoCall.teamMemberId) {
+        throw new Error('Vous n\'êtes pas autorisé à terminer cet appel');
+      }
+      
+      // Vérifier que l'appel est actif
+      if (videoCall.status !== 'active') {
+        throw new Error(`Impossible de terminer un appel qui n'est pas actif (statut actuel: ${videoCall.status})`);
+      }
+      
+      const now = new Date();
+      
+      // Calculer la durée réelle de l'appel en minutes
+      const actualDurationMs = now - new Date(videoCall.startedAt);
+      const actualDurationMinutes = Math.ceil(actualDurationMs / (1000 * 60));
+      
+      // Mettre à jour l'appel en base de données
+      const updatedCall = await prisma.videoCall.update({
+        where: { id: callId },
+        data: {
+          status: 'completed',
+          endedAt: now,
+          actualDuration: actualDurationMinutes
+        }
+      });
+      
+      // Supprimer l'appel de la map des appels actifs
+      this.activeRooms.delete(callId);
+      
+      // Déterminer si un remboursement partiel est nécessaire
+      let refundInfo = null;
+      
+      if (actualDurationMinutes < videoCall.scheduledDuration) {
+        // Calculer le montant à rembourser (pour la durée non utilisée)
+        const usedPercentage = actualDurationMinutes / videoCall.scheduledDuration;
+        const actualCost = videoCall.request.cost * usedPercentage;
+        const refundAmount = videoCall.request.cost - actualCost;
+        
+        if (refundAmount > 0) {
+          // Enregistrer le remboursement
+          const refund = await prisma.videoCallRefund.create({
+            data: {
+              callId,
+              originalAmount: videoCall.request.cost,
+              refundAmount,
+              reason: 'Durée d\'appel plus courte que prévue',
+              status: 'pending',
+              createdAt: now
+            }
+          });
+          
+          refundInfo = {
+            refundId: refund.id,
+            amount: refundAmount,
+            status: refund.status
+          };
+        }
+      }
+      
+      // Créer un rapport d'appel
+      const callReport = await prisma.videoCallReport.create({
+        data: {
+          callId,
+          scheduledDuration: videoCall.scheduledDuration,
+          actualDuration: actualDurationMinutes,
+          originalCost: videoCall.request.cost,
+          actualCost: refundInfo ? (videoCall.request.cost - refundInfo.amount) : videoCall.request.cost,
+          hasRefund: !!refundInfo,
+          refundId: refundInfo?.refundId || null,
+          createdAt: now
+        }
+      });
+      
+      return {
+        callId,
+        status: 'completed',
+        scheduledDuration: videoCall.scheduledDuration,
+        actualDuration: actualDurationMinutes,
+        startedAt: videoCall.startedAt,
+        endedAt: now,
+        cost: {
+          original: videoCall.request.cost,
+          actual: refundInfo ? (videoCall.request.cost - refundInfo.amount) : videoCall.request.cost
+        },
+        refund: refundInfo,
+        reportId: callReport.id
+      };
+    } catch (error) {
+      console.error('Erreur lors de la terminaison de l\'appel:', error);
+      throw new Error(`Échec de la terminaison de l'appel: ${error.message}`);
+    }
+  }
+
+  /**
+   * Annule un appel vidéo
+   * @param {number} callId - ID de l'appel
+   * @param {number} userId - ID de l'utilisateur qui annule l'appel
+   * @param {string} reason - Raison de l'annulation
+   * @returns {Promise<Object>} - Détails de l'appel annulé
+   */
+  async cancelCall(callId, userId, reason) {
+    try {
+      // Vérifier que l'appel existe
+      const videoCall = await prisma.videoCall.findUnique({
+        where: { id: callId },
+        include: {
+          request: true
+        }
+      });
+      
+      if (!videoCall) {
+        throw new Error('Appel vidéo non trouvé');
+      }
+      
+      // Vérifier que l'utilisateur est autorisé à annuler l'appel
+      if (userId !== videoCall.userId && userId !== videoCall.teamMemberId) {
+        throw new Error('Vous n\'êtes pas autorisé à annuler cet appel');
+      }
+      
+      // Vérifier que l'appel n'est pas déjà terminé ou annulé
+      if (videoCall.status === 'completed' || videoCall.status === 'cancelled') {
+        throw new Error(`Impossible d'annuler un appel déjà ${videoCall.status}`);
+      }
+      
+      const now = new Date();
+      
+      // Mettre à jour l'appel en base de données
+      const updatedCall = await prisma.videoCall.update({
+        where: { id: callId },
+        data: {
+          status: 'cancelled',
+          endedAt: now,
+          cancellationReason: reason
+        }
+      });
+      
+      // Supprimer l'appel de la map des appels actifs
+      this.activeRooms.delete(callId);
+      
+      // Déterminer si un remboursement est nécessaire
+      let refundInfo = null;
+      
+      // Si l'appel n'a pas commencé ou a duré moins de 5 minutes, rembourser intégralement
+      if (videoCall.status === 'waiting' || 
+          (videoCall.status === 'active' && 
+           videoCall.startedAt && 
+           (now - new Date(videoCall.startedAt)) < 5 * 60 * 1000)) {
+        
+        // Enregistrer le remboursement
+        const refund = await prisma.videoCallRefund.create({
+          data: {
+            callId,
+            originalAmount: videoCall.request.cost,
+            refundAmount: videoCall.request.cost,
+            reason: `Appel annulé: ${reason}`,
+            status: 'pending',
+            createdAt: now
+          }
+        });
+        
+        refundInfo = {
+          refundId: refund.id,
+          amount: videoCall.request.cost,
+          status: refund.status
+        };
+      }
+      // Si l'appel a commencé mais a été annulé par le spectateur, pas de remboursement
+      else if (videoCall.status === 'active' && userId === videoCall.userId) {
+        refundInfo = {
+          refundId: null,
+          amount: 0,
+          status: 'not_applicable'
+        };
+      }
+      // Si l'appel a commencé mais a été annulé par le membre d'équipe, remboursement intégral
+      else if (videoCall.status === 'active' && userId === videoCall.teamMemberId) {
+        // Enregistrer le remboursement
+        const refund = await prisma.videoCallRefund.create({
+          data: {
+            callId,
+            originalAmount: videoCall.request.cost,
+            refundAmount: videoCall.request.cost,
+            reason: `Appel annulé par le membre d'équipe: ${reason}`,
+            status: 'pending',
+            createdAt: now
+          }
+        });
+        
+        refundInfo = {
+          refundId: refund.id,
+          amount: videoCall.request.cost,
+          status: refund.status
+        };
+      }
+      
+      return {
+        callId,
+        status: 'cancelled',
+        cancellationReason: reason,
+        cancelledBy: userId === videoCall.userId ? 'user' : 'team_member',
+        scheduledDuration: videoCall.scheduledDuration,
+        startedAt: videoCall.startedAt,
+        cancelledAt: now,
+        refund: refundInfo
+      };
+    } catch (error) {
+      console.error('Erreur lors de l\'annulation de l\'appel:', error);
+      throw new Error(`Échec de l'annulation de l'appel: ${error.message}`);
+    }
+  }
+
+  /**
+   * Récupère l'historique des appels d'un utilisateur
+   * @param {number} userId - ID de l'utilisateur
+   * @param {Object} options - Options de pagination
+   * @returns {Promise<Object>} - Historique d'appels paginé
+   */
+  async getUserCallHistory(userId, { page = 1, limit = 20, role = 'all' }) {
+    try {
+      const skip = (page - 1) * limit;
+      
+      // Construire la condition de filtre selon le rôle
+      let where = {};
+      
+      if (role === 'caller') {
+        where.userId = userId;
+      } else if (role === 'receiver') {
+        where.teamMemberId = userId;
+      } else {
+        // 'all' - appels en tant qu'appelant ou receveur
+        where.OR = [
+          { userId },
+          { teamMemberId: userId }
+        ];
+      }
+      
+      const [calls, total] = await Promise.all([
+        prisma.videoCall.findMany({
+          where,
+          orderBy: {
+            createdAt: 'desc'
+          },
+          skip,
+          take: parseInt(limit),
+          include: {
+            request: true,
+            user: {
+              select: {
+                id: true,
+                name: true
+              }
+            },
+            teamMember: {
+              select: {
+                id: true,
+                name: true,
+                type: true
+              }
+            },
+            film: {
+              select: {
+                id: true,
+                title: true
+              }
+            }
+          }
+        }),
+        prisma.videoCall.count({ where })
+      ]);
+      
+      const formattedCalls = calls.map(call => ({
+        id: call.id,
+        roomId: call.roomId,
+        status: call.status,
+        user: call.user,
+        teamMember: call.teamMember,
+        film: call.film,
+        userRole: call.userId === userId ? 'caller' : 'receiver',
+        scheduledDuration: call.scheduledDuration,
+        actualDuration: call.actualDuration,
+        cost: call.request.cost,
+        createdAt: call.createdAt,
+        startedAt: call.startedAt,
+        endedAt: call.endedAt,
+        cancellationReason: call.cancellationReason
+      }));
+      
+      return {
+        data: formattedCalls,
+        pagination: {
+          total,
+          page: parseInt(page),
+          limit: parseInt(limit),
+          totalPages: Math.ceil(total / limit)
+        }
+      };
+    } catch (error) {
+      console.error('Erreur lors de la récupération de l\'historique d\'appels:', error);
+      throw new Error(`Échec de la récupération de l'historique: ${error.message}`);
+    }
+  }
+
+  /**
+   * Récupère les appels en attente pour un membre d'équipe
+   * @param {number} teamMemberId - ID du membre d'équipe
+   * @returns {Promise<Array>} - Liste des appels en attente
+   */
+  async getPendingCalls(teamMemberId) {
+    try {
+      const pendingCalls = await prisma.videoCall.findMany({
+        where: {
+          teamMemberId,
+          status: 'waiting'
+        },
+        orderBy: {
+          createdAt: 'desc'
+        },
+        include: {
+          request: true,
+          user: {
+            select: {
+              id: true,
+              name: true
+            }
+          },
+          film: {
+            select: {
+              id: true,
+              title: true
+            }
+          }
+        }
+      });
+      
+      return pendingCalls.map(call => ({
+        id: call.id,
+        roomId: call.roomId,
+        user: call.user,
+        film: call.film,
+        scheduledDuration: call.scheduledDuration,
+        cost: call.request.cost,
+        createdAt: call.createdAt
+      }));
+    } catch (error) {
+      console.error('Erreur lors de la récupération des appels en attente:', error);
+      throw new Error(`Échec de la récupération des appels en attente: ${error.message}`);
+    }
+  }
+
+  /**
+   * Surveille les appels actifs et gère les timeouts
+   */
+  async monitorActiveCalls() {
+    try {
+      const now = new Date();
+      
+      for (const [callId, roomInfo] of this.activeRooms.entries()) {
+        // Vérifier si l'appel a dépassé sa durée prévue
+        if (roomInfo.status === 'active' && roomInfo.startedAt) {
+          const durationMs = now - roomInfo.startedAt;
+          const durationMinutes = Math.floor(durationMs / (1000 * 60));
+          
+          // Si la durée a dépassé le temps prévu, terminer automatiquement l'appel
+          if (durationMinutes >= roomInfo.durationMinutes) {
+            try {
+              await this.endCall(callId, roomInfo.teamMemberId);
+              console.log(`Appel #${callId} terminé automatiquement après ${durationMinutes} minutes`);
+            } catch (error) {
+              console.error(`Erreur lors de la terminaison automatique de l'appel #${callId}:`, error);
+            }
+          }
+        }
+        
+        // Vérifier si l'appel est en attente depuis trop longtemps (plus de 15 minutes)
+        if (roomInfo.status === 'waiting') {
+          const waitDurationMs = now - roomInfo.createdAt;
+          
+          if (waitDurationMs > 15 * 60 * 1000) {
+            try {
+              await this.cancelCall(
+                callId,
+                roomInfo.teamMemberId,
+                'Appel en attente depuis trop longtemps'
+              );
+              console.log(`Appel #${callId} annulé automatiquement après 15 minutes d'attente`);
+            } catch (error) {
+              console.error(`Erreur lors de l'annulation automatique de l'appel #${callId}:`, error);
+            }
+          }
+        }
+      }
+    } catch (error) {
+      console.error('Erreur lors de la surveillance des appels actifs:', error);
+    }
+  }
+
+  /**
+   * Génère un rapport des revenus pour un membre d'équipe
+   * @param {number} teamMemberId - ID du membre d'équipe
+   * @param {Object} dateRange - Plage de dates pour le rapport
+   * @returns {Promise<Object>} - Rapport de revenus
+   */
+  async generateTeamMemberEarningsReport(teamMemberId, { startDate, endDate }) {
+    try {
+      // Convertir les dates en objets Date
+      const start = new Date(startDate);
+      const end = new Date(endDate);
+      
+      // Récupérer tous les appels complétés du membre d'équipe dans la plage de dates
+      const completedCalls = await prisma.videoCall.findMany({
+        where: {
+          teamMemberId,
+          status: 'completed',
+          endedAt: {
+            gte: start,
+            lte: end
+          }
+        },
+        include: {
+          request: true,
+          user: {
+            select: {
+              id: true,
+              name: true
+            }
+          },
+          film: {
+            select: {
+              id: true,
+              title: true
+            }
+          }
+        }
+      });
+      
+      // Calculer les revenus totaux et autres statistiques
+      let totalEarnings = 0;
+      let totalDuration = 0;
+      let totalCalls = completedCalls.length;
+      
+      const callDetails = completedCalls.map(call => {
+        // Si l'appel a un remboursement, ajuster le montant
+        const actualCost = call.actualDuration < call.scheduledDuration
+          ? (call.request.cost * (call.actualDuration / call.scheduledDuration))
+          : call.request.cost;
+        
+        const teamMemberShare = actualCost * (this.revenueDistribution.teamMember / 100);
+        
+        totalEarnings += teamMemberShare;
+        totalDuration += call.actualDuration;
+        
+        return {
+          callId: call.id,
+          date: call.endedAt,
+          user: call.user,
+          film: call.film,
+          duration: call.actualDuration,
+          earnings: teamMemberShare
+        };
+      });
+      
+      return {
+        teamMemberId,
+        period: {
+          start: startDate,
+          end: endDate
+        },
+        summary: {
+          totalCalls,
+          totalDuration,
+          totalEarnings,
+          averageCallDuration: totalCalls > 0 ? (totalDuration / totalCalls) : 0,
+          averageEarningsPerCall: totalCalls > 0 ? (totalEarnings / totalCalls) : 0
+        },
+        calls: callDetails
+      };
+    } catch (error) {
+      console.error('Erreur lors de la génération du rapport de revenus:', error);
+      throw new Error(`Échec de la génération du rapport: ${error.message}`);
+    }
+  }
+}
+
+// Exporter une instance unique du service
+module.exports = new VideoCallService();
+          teamMemberId,
+          filmId,
+          durationMinutes,
+          cost: callCost.totalCost,
+          platformFee: callCost.distribution.platformFee,
+          teamMemberShare: callCost.distribution.teamMemberShare,
+          productionShare: callCost.distribution.productionShare,
+          status: 'pending',
+          createdAt: new Date()
+        }
+      });
+      
+      return {
+        requestId: callRequest.id,
+        user: {
+          id: user.id,
+          name: user.name
+        },
+        teamMember: {
+          id: teamMember.id,
+          name: teamMember.name,
+          role: memberRole
+        },
+        film: { id: filmId },
+        durationMinutes,
+        cost: callCost.totalCost,
+        status: callRequest.status,
+        createdAt: callRequest.createdAt
+      };
+    } catch (error) {
+      console.error('Erreur lors de l\'initiation de la demande d\'appel:', error);
+      throw new Error(`Échec de l'initiation de la demande: ${error.message}`);
+    }
+  }
+
+  /**
+   * Traite le paiement d'un appel vidéo
+   * @param {number} requestId - ID de la demande d'appel
+   * @param {string} paymentMethod - Méthode de paiement
+   * @param {string} transactionId - ID de la transaction de paiement
+   * @returns {Promise<Object>} - Détails de l'appel après paiement
+   */
+  async processCallPayment(requestId, paymentMethod, transactionId) {
+    try {
+      // Récupérer la demande d'appel
+      const callRequest = await prisma.videoCallRequest.findUnique({
+        where: { id: requestId },
+        include: {
+          user: {
+            select: {
+              id: true,
+              name: true
+            }
+          },
+          teamMember: {
+            select: {
+              id: true,
+              name: true,
+              type: true
+            }
+          },
+          film: {
+            select: {
+              id: true,
+              title: true
+            }
+          }
+        }
+      });
+      
+      if (!callRequest) {
+        throw new Error('Demande d\'appel non trouvée');
+      }
+      
+      if (callRequest.status !== 'pending') {
+        throw new Error(`Cette demande d'appel est déjà ${callRequest.status}`);
+      }
+      
+      // Mettre à jour la demande d'appel
+      const updatedCallRequest = await prisma.videoCallRequest.update({
+        where: { id: requestId },
+        data: {
+          status: 'paid',
+          paymentMethod,
+          transactionId,
+          paidAt: new Date()
+        }
+      });
+      
+      // Générer un identifiant unique pour la salle d'appel
+      const roomId = uuidv4();
+      
+      // Créer l'appel vidéo en base de données
+      const videoCall = await prisma.videoCall.create({
+        data: {
+          requestId,
+          roomId,
+          userId: callRequest.userId,
+          teamMemberId: callRequest.teamMemberId,
+          filmId: callRequest.filmId,
+          status: 'waiting',
+          scheduledDuration: callRequest.durationMinutes,
+          createdAt: new Date()
+        }
+      });
+      
+      // Générer des tokens d'accès pour les participants
+      const userToken = this.generateCallToken(
+        videoCall.id, 
+        callRequest.userId, 
+        'viewer'
+      );
+      
+      const teamMemberToken = this.generateCallToken(
+        videoCall.id, 
+        callRequest.teamMemberId, 
+        callRequest.teamMember.type
+      );
+      
+      // Stocker les informations de l'appel dans la map
+      this.activeRooms.set(videoCall.id, {
+        roomId,
+        callId: videoCall.id,
+        userId: callRequest.userId,
+        teamMemberId: callRequest.teamMemberId,
+        filmId: callRequest.filmId,
+        durationMinutes: callRequest.durationMinutes,
+        status: 'waiting',
+        createdAt: new Date(),
+        participants: {}
+      });
+      
+      return {
+        callId: videoCall.id,
+        roomId,
+        userToken,
+        teamMemberToken,
+        user: callRequest.user,
+        teamMember: callRequest.teamMember,
+        film: callRequest.film,
+        durationMinutes: callRequest.durationMinutes,
+        cost: callRequest.cost,
+        status: 'waiting',
+        createdAt: videoCall.createdAt
+      };
+    } catch (error) {
+      console.error('Erreur lors du traitement du paiement d\'appel:', error);
+      throw new Error(`Échec du traitement du paiement: ${error.message}`);
+    }
+  }
+
+  /**
+   * Rejoint un appel vidéo
+   * @param {string} token - Jeton d'accès à l'appel
+   * @returns {Promise<Object>} - Détails de la connexion à l'appel
+   */
+  async joinCall(token) {
+    try {
+      // Vérifier le jeton
+      const decoded = this.verifyCallToken(token);
+      
+      if (!decoded) {
+        throw new Error('Jeton d\'accès invalide ou expiré');
+      }
+      
+      const { callId, userId, userRole } = decoded;
+      
+      // Vérifier que l'appel existe
+      const videoCall = await prisma.videoCall.findUnique({
+        where: { id: callId },
+        include: {
+          request: true,
+          user: {
+            select: {
+              id: true,
+              name: true
+            }
+          },
+          teamMember: {
+            select: {
+              id: true,
+              name: true,
+              type: true
+            }
+          },
+          film: {
+            select: {
+              id: true,
+              title: true
+            }
+          }
+        }
+      });
+      
+      if (!videoCall) {
+        throw new Error('Appel vidéo non trouvé');
+      }
+      
+      // Vérifier que l'utilisateur est autorisé à rejoindre l'appel
+      if (userId !== videoCall.userId && userId !== videoCall.teamMemberId) {
+        throw new Error('Vous n\'êtes pas autorisé à rejoindre cet appel');
+      }
+      
+      // Vérifier l'état de l'appel
+      if (videoCall.status === 'completed') {
+        throw new Error('Cet appel est déjà terminé');
+      }
+      
+      if (videoCall.status === 'cancelled') {
+        throw new Error('Cet appel a été annulé');
+      }
+      
+      // Récupérer les informations de l'appel actif
+      let activeRoom = this.activeRooms.get(callId);
+      
+      if (!activeRoom) {
+        // Si l'appel n'est pas dans la map, le réinitialiser
+        activeRoom = {
+          roomId: videoCall.roomId,
+          callId,
+          userId: videoCall.userId,
+          teamMemberId: videoCall.teamMemberId,
+          filmId: videoCall.filmId,
+          durationMinutes: videoCall.scheduledDuration,
+          status: videoCall.status,
+          createdAt: videoCall.createdAt,
+          participants: {}
+        };
+        
+        this.activeRooms.set(callId, activeRoom);
+      }
+      
+      // Marquer le participant comme connecté
+      activeRoom.participants[userId] = {
+        userId,

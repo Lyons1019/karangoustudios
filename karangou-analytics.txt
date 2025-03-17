@@ -1,0 +1,456 @@
+// Fichier: server/services/analytics/index.js
+
+const { PrismaClient } = require('@prisma/client');
+const cron = require('node-cron');
+const prisma = new PrismaClient();
+
+/**
+ * Service d'analytique pour Karangou Studios
+ * Fournit des rapports et des insights sur l'utilisation de la plateforme
+ */
+class AnalyticsService {
+  constructor() {
+    // Configuration des tâches planifiées
+    this.setupScheduledTasks();
+  }
+
+  /**
+   * Configure les tâches planifiées pour la génération de rapports
+   */
+  setupScheduledTasks() {
+    // Rapport quotidien (tous les jours à 1h du matin)
+    cron.schedule('0 1 * * *', async () => {
+      try {
+        await this.generateDailyReport();
+        console.log('Rapport quotidien généré avec succès');
+      } catch (error) {
+        console.error('Erreur lors de la génération du rapport quotidien:', error);
+      }
+    });
+    
+    // Rapport hebdomadaire (tous les lundis à 2h du matin)
+    cron.schedule('0 2 * * 1', async () => {
+      try {
+        await this.generateWeeklyReport();
+        console.log('Rapport hebdomadaire généré avec succès');
+      } catch (error) {
+        console.error('Erreur lors de la génération du rapport hebdomadaire:', error);
+      }
+    });
+    
+    // Rapport mensuel (1er jour du mois à 3h du matin)
+    cron.schedule('0 3 1 * *', async () => {
+      try {
+        await this.generateMonthlyReport();
+        console.log('Rapport mensuel généré avec succès');
+      } catch (error) {
+        console.error('Erreur lors de la génération du rapport mensuel:', error);
+      }
+    });
+  }
+
+  /**
+   * Génère un rapport quotidien d'activité
+   * @returns {Promise<Object>} - Rapport généré
+   */
+  async generateDailyReport() {
+    try {
+      const yesterday = new Date();
+      yesterday.setDate(yesterday.getDate() - 1);
+      yesterday.setHours(0, 0, 0, 0);
+      
+      const today = new Date();
+      today.setHours(0, 0, 0, 0);
+      
+      // 1. Nombre de nouveaux utilisateurs
+      const newUsers = await prisma.user.count({
+        where: {
+          createdAt: {
+            gte: yesterday,
+            lt: today
+          }
+        }
+      });
+      
+      // 2. Nombre de visionnages
+      const viewings = await prisma.filmViewing.count({
+        where: {
+          createdAt: {
+            gte: yesterday,
+            lt: today
+          }
+        }
+      });
+      
+      // 3. Films les plus vus
+      const topFilms = await prisma.filmViewing.groupBy({
+        by: ['filmId'],
+        where: {
+          createdAt: {
+            gte: yesterday,
+            lt: today
+          }
+        },
+        _count: {
+          filmId: true
+        },
+        orderBy: {
+          _count: {
+            filmId: 'desc'
+          }
+        },
+        take: 5
+      });
+      
+      // Récupérer les détails des films
+      const topFilmsDetails = [];
+      
+      for (const filmStat of topFilms) {
+        const film = await prisma.film.findUnique({
+          where: { id: filmStat.filmId },
+          select: {
+            id: true,
+            title: true,
+            director: true
+          }
+        });
+        
+        topFilmsDetails.push({
+          film,
+          viewCount: filmStat._count.filmId
+        });
+      }
+      
+      // 4. Nombre de contributions
+      const contributions = await prisma.contribution.findMany({
+        where: {
+          createdAt: {
+            gte: yesterday,
+            lt: today
+          }
+        }
+      });
+      
+      const contributionCount = contributions.length;
+      const contributionTotal = contributions.reduce((sum, contribution) => sum + contribution.amount, 0);
+      
+      // 5. Projets les plus financés
+      const topProjects = await prisma.contribution.groupBy({
+        by: ['projectId'],
+        where: {
+          createdAt: {
+            gte: yesterday,
+            lt: today
+          }
+        },
+        _sum: {
+          amount: true
+        },
+        orderBy: {
+          _sum: {
+            amount: 'desc'
+          }
+        },
+        take: 5
+      });
+      
+      // Récupérer les détails des projets
+      const topProjectsDetails = [];
+      
+      for (const projectStat of topProjects) {
+        const project = await prisma.project.findUnique({
+          where: { id: projectStat.projectId },
+          select: {
+            id: true,
+            title: true,
+            targetAmount: true,
+            currentAmount: true
+          }
+        });
+        
+        topProjectsDetails.push({
+          project,
+          contributionAmount: projectStat._sum.amount
+        });
+      }
+      
+      // Création du rapport
+      const report = {
+        type: 'daily',
+        date: yesterday.toISOString().split('T')[0],
+        data: {
+          newUsers,
+          viewings,
+          topFilms: topFilmsDetails,
+          contributions: {
+            count: contributionCount,
+            total: contributionTotal
+          },
+          topProjects: topProjectsDetails
+        },
+        createdAt: new Date()
+      };
+      
+      // Enregistrer le rapport dans la base de données
+      await prisma.analyticsReport.create({
+        data: {
+          type: report.type,
+          date: report.date,
+          data: JSON.stringify(report.data),
+          createdAt: report.createdAt
+        }
+      });
+      
+      return report;
+    } catch (error) {
+      console.error('Erreur lors de la génération du rapport quotidien:', error);
+      throw new Error(`Échec de la génération du rapport: ${error.message}`);
+    }
+  }
+
+  /**
+   * Génère un rapport hebdomadaire d'activité
+   * @returns {Promise<Object>} - Rapport généré
+   */
+  async generateWeeklyReport() {
+    try {
+      const startOfLastWeek = new Date();
+      startOfLastWeek.setDate(startOfLastWeek.getDate() - 7);
+      startOfLastWeek.setHours(0, 0, 0, 0);
+      
+      const endOfLastWeek = new Date();
+      endOfLastWeek.setHours(0, 0, 0, 0);
+      
+      // 1. Nombre de nouveaux utilisateurs par jour
+      const newUsersByDay = await prisma.$queryRaw`
+        SELECT 
+          DATE_TRUNC('day', "createdAt") as day,
+          COUNT(*) as count
+        FROM "User"
+        WHERE "createdAt" >= ${startOfLastWeek} AND "createdAt" < ${endOfLastWeek}
+        GROUP BY day
+        ORDER BY day
+      `;
+      
+      // 2. Visionnages par jour
+      const viewingsByDay = await prisma.$queryRaw`
+        SELECT 
+          DATE_TRUNC('day', "createdAt") as day,
+          COUNT(*) as count
+        FROM "FilmViewing"
+        WHERE "createdAt" >= ${startOfLastWeek} AND "createdAt" < ${endOfLastWeek}
+        GROUP BY day
+        ORDER BY day
+      `;
+      
+      // 3. Films les plus vus de la semaine
+      const topFilms = await prisma.filmViewing.groupBy({
+        by: ['filmId'],
+        where: {
+          createdAt: {
+            gte: startOfLastWeek,
+            lt: endOfLastWeek
+          }
+        },
+        _count: {
+          filmId: true
+        },
+        orderBy: {
+          _count: {
+            filmId: 'desc'
+          }
+        },
+        take: 10
+      });
+      
+      // Récupérer les détails des films
+      const topFilmsDetails = [];
+      
+      for (const filmStat of topFilms) {
+        const film = await prisma.film.findUnique({
+          where: { id: filmStat.filmId },
+          select: {
+            id: true,
+            title: true,
+            director: true,
+            genres: true,
+            averageRating: true
+          }
+        });
+        
+        topFilmsDetails.push({
+          film,
+          viewCount: filmStat._count.filmId
+        });
+      }
+      
+      // 4. Contributions par jour
+      const contributionsByDay = await prisma.$queryRaw`
+        SELECT 
+          DATE_TRUNC('day', "createdAt") as day,
+          COUNT(*) as count,
+          SUM(amount) as total
+        FROM "Contribution"
+        WHERE "createdAt" >= ${startOfLastWeek} AND "createdAt" < ${endOfLastWeek}
+        GROUP BY day
+        ORDER BY day
+      `;
+      
+      // 5. Projets les plus financés de la semaine
+      const topProjects = await prisma.contribution.groupBy({
+        by: ['projectId'],
+        where: {
+          createdAt: {
+            gte: startOfLastWeek,
+            lt: endOfLastWeek
+          }
+        },
+        _sum: {
+          amount: true
+        },
+        _count: {
+          id: true
+        },
+        orderBy: {
+          _sum: {
+            amount: 'desc'
+          }
+        },
+        take: 10
+      });
+      
+      // Récupérer les détails des projets
+      const topProjectsDetails = [];
+      
+      for (const projectStat of topProjects) {
+        const project = await prisma.project.findUnique({
+          where: { id: projectStat.projectId },
+          select: {
+            id: true,
+            title: true,
+            targetAmount: true,
+            currentAmount: true,
+            endDate: true,
+            status: true
+          }
+        });
+        
+        topProjectsDetails.push({
+          project,
+          contributionAmount: projectStat._sum.amount,
+          contributionCount: projectStat._count.id
+        });
+      }
+      
+      // 6. Statistiques d'achèvement des visionnages
+      const completionStats = await prisma.$queryRaw`
+        SELECT 
+          COUNT(*) as total_views,
+          SUM(CASE WHEN completed = true THEN 1 ELSE 0 END) as completed_views,
+          CAST(SUM(CASE WHEN completed = true THEN 1 ELSE 0 END) AS FLOAT) / COUNT(*) * 100 as completion_rate
+        FROM "FilmViewing"
+        WHERE "createdAt" >= ${startOfLastWeek} AND "createdAt" < ${endOfLastWeek}
+      `;
+      
+      // Création du rapport
+      const report = {
+        type: 'weekly',
+        startDate: startOfLastWeek.toISOString().split('T')[0],
+        endDate: new Date(endOfLastWeek.getTime() - 1).toISOString().split('T')[0],
+        data: {
+          newUsersByDay,
+          viewingsByDay,
+          topFilms: topFilmsDetails,
+          contributionsByDay,
+          topProjects: topProjectsDetails,
+          completionStats: completionStats[0]
+        },
+        createdAt: new Date()
+      };
+      
+      // Enregistrer le rapport dans la base de données
+      await prisma.analyticsReport.create({
+        data: {
+          type: report.type,
+          date: report.startDate,
+          data: JSON.stringify(report.data),
+          createdAt: report.createdAt
+        }
+      });
+      
+      return report;
+    } catch (error) {
+      console.error('Erreur lors de la génération du rapport hebdomadaire:', error);
+      throw new Error(`Échec de la génération du rapport: ${error.message}`);
+    }
+  }
+
+  /**
+   * Génère un rapport mensuel d'activité
+   * @returns {Promise<Object>} - Rapport généré
+   */
+  async generateMonthlyReport() {
+    try {
+      // Déterminer le mois précédent
+      const today = new Date();
+      const startOfLastMonth = new Date(today.getFullYear(), today.getMonth() - 1, 1);
+      const endOfLastMonth = new Date(today.getFullYear(), today.getMonth(), 1);
+      
+      // 1. Résumé des utilisateurs
+      const userStats = await prisma.$queryRaw`
+        SELECT 
+          COUNT(*) as total_users,
+          COUNT(CASE WHEN "createdAt" >= ${startOfLastMonth} AND "createdAt" < ${endOfLastMonth} THEN 1 END) as new_users,
+          COUNT(CASE WHEN "type" = 'viewer' THEN 1 END) as viewers,
+          COUNT(CASE WHEN "type" = 'director' THEN 1 END) as directors,
+          COUNT(CASE WHEN "type" = 'producer' THEN 1 END) as producers
+        FROM "User"
+        WHERE "isActive" = true
+      `;
+      
+      // 2. Répartition géographique des utilisateurs
+      const usersByCountry = await prisma.user.groupBy({
+        by: ['country'],
+        where: {
+          isActive: true
+        },
+        _count: {
+          id: true
+        },
+        orderBy: {
+          _count: {
+            id: 'desc'
+          }
+        }
+      });
+      
+      // 3. Statistiques de films
+      const filmStats = await prisma.$queryRaw`
+        SELECT 
+          COUNT(*) as total_films,
+          COUNT(CASE WHEN "createdAt" >= ${startOfLastMonth} AND "createdAt" < ${endOfLastMonth} THEN 1 END) as new_films,
+          AVG("viewCount") as avg_views_per_film,
+          AVG("averageRating") as avg_rating
+        FROM "Film"
+        WHERE "isActive" = true
+      `;
+      
+      // 4. Répartition des films par genre
+      const filmsByGenre = await prisma.$queryRaw`
+        SELECT 
+          UNNEST(string_to_array("genres", ',')) as genre,
+          COUNT(*) as count
+        FROM "Film"
+        WHERE "isActive" = true
+        GROUP BY genre
+        ORDER BY count DESC
+      `;
+      
+      // 5. Statistiques de projets
+      const projectStats = await prisma.$queryRaw`
+        SELECT 
+          COUNT(*) as total_projects,
+          COUNT(CASE WHEN "createdAt" >= ${startOfLastMonth} AND "createdAt" < ${endOfLastMonth} THEN 1 END) as new_projects,
+          COUNT(CASE WHEN "status" = 'active' THEN 1 END) as active_projects,
+          COUNT(CASE WHEN "status" = 'funded' THEN 1 END) as funded_projects,
+          COUNT(CASE WHEN "status" = 'completed' THEN 1 END

@@ -1,0 +1,628 @@
+// Fichier: server/services/payment/mobileMoney.js
+
+const axios = require('axios');
+const crypto = require('crypto');
+const { PrismaClient } = require('@prisma/client');
+
+const prisma = new PrismaClient();
+
+/**
+ * Service d'intégration Mobile Money pour Karangou Studios
+ * Supporte les fournisseurs MTN Money, Moov Money et Flooz (Togo)
+ */
+class MobileMoneyService {
+  constructor() {
+    this.providers = {
+      mtn: {
+        name: 'MTN Mobile Money',
+        baseUrl: process.env.MTN_API_BASE_URL,
+        apiKey: process.env.MTN_API_KEY,
+        apiSecret: process.env.MTN_API_SECRET,
+        callbackUrl: `${process.env.API_BASE_URL}/payments/mobile-money/callback/mtn`
+      },
+      moov: {
+        name: 'Moov Money',
+        baseUrl: process.env.MOOV_API_BASE_URL,
+        apiKey: process.env.MOOV_API_KEY,
+        apiSecret: process.env.MOOV_API_SECRET,
+        callbackUrl: `${process.env.API_BASE_URL}/payments/mobile-money/callback/moov`
+      },
+      flooz: {
+        name: 'Flooz',
+        baseUrl: process.env.FLOOZ_API_BASE_URL,
+        apiKey: process.env.FLOOZ_API_KEY,
+        apiSecret: process.env.FLOOZ_API_SECRET,
+        callbackUrl: `${process.env.API_BASE_URL}/payments/mobile-money/callback/flooz`
+      }
+    };
+  }
+
+  /**
+   * Génère un identifiant de transaction unique
+   */
+  generateTransactionId() {
+    return `MM-${Date.now()}-${crypto.randomBytes(4).toString('hex')}`;
+  }
+
+  /**
+   * Formate le numéro de téléphone au format international
+   * @param {string} phoneNumber - Numéro de téléphone à formater
+   * @returns {string} Numéro de téléphone formaté
+   */
+  formatPhoneNumber(phoneNumber) {
+    // Nettoyer le numéro (enlever espaces, tirets, etc.)
+    let cleaned = phoneNumber.replace(/\D/g, '');
+    
+    // Vérifier si le numéro commence par le code pays du Togo (+228)
+    if (!cleaned.startsWith('228') && !cleaned.startsWith('00228') && !cleaned.startsWith('+228')) {
+      if (cleaned.length === 8) {
+        // Ajouter le code pays du Togo si absent
+        cleaned = `228${cleaned}`;
+      }
+    } else {
+      // Enlever le préfixe + ou 00
+      cleaned = cleaned.replace(/^\+|^00/, '');
+    }
+    
+    return cleaned;
+  }
+
+  /**
+   * Valide si le numéro de téléphone appartient au réseau spécifié
+   * @param {string} phoneNumber - Numéro de téléphone à valider
+   * @param {string} provider - Fournisseur de Mobile Money ('mtn', 'moov', 'flooz')
+   * @returns {boolean} - true si valide, false sinon
+   */
+  validateProviderPhoneNumber(phoneNumber, provider) {
+    const formattedNumber = this.formatPhoneNumber(phoneNumber);
+    
+    // Préfixes MTN Togo: 90, 91, 92, 93
+    if (provider === 'mtn') {
+      return /^228(90|91|92|93)\d{6}$/.test(formattedNumber);
+    }
+    
+    // Préfixes Moov/Flooz Togo: 96, 97, 98, 99
+    if (provider === 'moov' || provider === 'flooz') {
+      return /^228(96|97|98|99)\d{6}$/.test(formattedNumber);
+    }
+    
+    return false;
+  }
+
+  /**
+   * Initie un paiement Mobile Money
+   * @param {string} provider - Fournisseur de Mobile Money ('mtn', 'moov', 'flooz')
+   * @param {string} phoneNumber - Numéro de téléphone du client
+   * @param {number} amount - Montant à payer (en FCFA)
+   * @param {number} projectId - ID du projet associé
+   * @param {number} userId - ID de l'utilisateur
+   * @param {string} description - Description du paiement
+   * @returns {Promise<Object>} - Résultat de l'initiation du paiement
+   */
+  async initiatePayment(provider, phoneNumber, amount, projectId, userId, description) {
+    try {
+  async initiatePayment(provider, phoneNumber, amount, projectId, userId, description) {
+    try {
+      // Vérifier que le fournisseur est valide
+      if (!this.providers[provider]) {
+        throw new Error(`Fournisseur non pris en charge: ${provider}`);
+      }
+      
+      // Formater et valider le numéro de téléphone
+      const formattedPhone = this.formatPhoneNumber(phoneNumber);
+      
+      if (!this.validateProviderPhoneNumber(formattedPhone, provider)) {
+        throw new Error(`Le numéro ${phoneNumber} n'est pas valide pour ${this.providers[provider].name}`);
+      }
+      
+      // Générer un ID de transaction unique
+      const transactionId = this.generateTransactionId();
+      
+      // Enregistrer la transaction dans la base de données
+      const transaction = await prisma.paymentTransaction.create({
+        data: {
+          transactionId,
+          userId,
+          projectId,
+          amount,
+          currency: 'XOF', // FCFA
+          method: 'mobile_money',
+          provider,
+          phoneNumber: formattedPhone,
+          status: 'pending',
+          createdAt: new Date(),
+          updatedAt: new Date()
+        }
+      });
+      
+      // Préparer les données pour l'API du fournisseur
+      let apiResponse;
+      
+      switch (provider) {
+        case 'mtn':
+          apiResponse = await this.processMtnPayment(formattedPhone, amount, transactionId, description);
+          break;
+        case 'moov':
+          apiResponse = await this.processMoovPayment(formattedPhone, amount, transactionId, description);
+          break;
+        case 'flooz':
+          apiResponse = await this.processFloozPayment(formattedPhone, amount, transactionId, description);
+          break;
+        default:
+          throw new Error(`Fournisseur non supporté: ${provider}`);
+      }
+      
+      // Mettre à jour la transaction avec les informations de la réponse API
+      await prisma.paymentTransaction.update({
+        where: { id: transaction.id },
+        data: {
+          updatedAt: new Date(),
+          // Stocker des informations supplémentaires de la réponse si nécessaire
+        }
+      });
+      
+      return {
+        success: true,
+        transactionId,
+        provider: this.providers[provider].name,
+        message: `Demande de paiement envoyée au numéro ${phoneNumber}. Veuillez confirmer la transaction sur votre téléphone.`,
+        amount,
+        currency: 'XOF',
+        referenceData: apiResponse
+      };
+      
+    } catch (error) {
+      console.error(`Erreur lors de l'initiation du paiement ${provider}:`, error);
+      
+      // Enregistrer l'erreur si une transaction a été créée
+      if (error.transactionId) {
+        await prisma.paymentTransaction.update({
+          where: { transactionId: error.transactionId },
+          data: {
+            status: 'failed',
+            errorMessage: error.message,
+            updatedAt: new Date()
+          }
+        });
+      }
+      
+      throw new Error(`Échec de l'initiation du paiement: ${error.message}`);
+    }
+  }
+
+  /**
+   * Traite un paiement via MTN Mobile Money
+   */
+  async processMtnPayment(phoneNumber, amount, transactionId, description) {
+    try {
+      const { baseUrl, apiKey, apiSecret, callbackUrl } = this.providers.mtn;
+      
+      // Obtenir un token d'accès (dans une implémentation réelle)
+      const tokenResponse = await axios.post(
+        `${baseUrl}/collection/token`,
+        {
+          grant_type: 'client_credentials'
+        },
+        {
+          auth: {
+            username: apiKey,
+            password: apiSecret
+          }
+        }
+      );
+      
+      const accessToken = tokenResponse.data.access_token;
+      
+      // Initier la demande de paiement
+      const paymentResponse = await axios.post(
+        `${baseUrl}/collection/v1/requesttopay`,
+        {
+          amount: amount.toString(),
+          currency: 'XOF',
+          externalId: transactionId,
+          payer: {
+            partyIdType: 'MSISDN',
+            partyId: phoneNumber
+          },
+          payerMessage: description || 'Paiement Karangou Studios',
+          payeeNote: `Contribution au projet #${transactionId}`
+        },
+        {
+          headers: {
+            'Authorization': `Bearer ${accessToken}`,
+            'X-Reference-Id': transactionId,
+            'X-Callback-Url': callbackUrl,
+            'Content-Type': 'application/json'
+          }
+        }
+      );
+      
+      return {
+        referenceId: transactionId,
+        status: paymentResponse.status === 202 ? 'pending' : 'failed'
+      };
+      
+    } catch (error) {
+      console.error('Erreur MTN Mobile Money API:', error.response?.data || error.message);
+      throw new Error(`Erreur lors de la communication avec MTN Mobile Money: ${error.message}`);
+    }
+  }
+
+  /**
+   * Traite un paiement via Moov Money
+   */
+  async processMoovPayment(phoneNumber, amount, transactionId, description) {
+    try {
+      const { baseUrl, apiKey, apiSecret, callbackUrl } = this.providers.moov;
+      
+      // Simuler une implémentation Moov Money (adapter selon l'API réelle)
+      const paymentResponse = await axios.post(
+        `${baseUrl}/api/v1/payments`,
+        {
+          phoneNumber,
+          amount: amount.toString(),
+          currency: 'XOF',
+          reference: transactionId,
+          description: description || 'Paiement Karangou Studios',
+          callbackUrl: `${callbackUrl}?reference=${transactionId}`
+        },
+        {
+          headers: {
+            'Authorization': `Bearer ${apiKey}`,
+            'Content-Type': 'application/json'
+          }
+        }
+      );
+      
+      return {
+        referenceId: transactionId,
+        status: 'pending',
+        providerReference: paymentResponse.data.providerReference
+      };
+      
+    } catch (error) {
+      console.error('Erreur Moov Money API:', error.response?.data || error.message);
+      throw new Error(`Erreur lors de la communication avec Moov Money: ${error.message}`);
+    }
+  }
+
+  /**
+   * Traite un paiement via Flooz
+   */
+  async processFloozPayment(phoneNumber, amount, transactionId, description) {
+    try {
+      const { baseUrl, apiKey, apiSecret, callbackUrl } = this.providers.flooz;
+      
+      // Simuler une implémentation Flooz (adapter selon l'API réelle)
+      const paymentResponse = await axios.post(
+        `${baseUrl}/api/merchant/payments`,
+        {
+          msisdn: phoneNumber,
+          amount: amount.toString(),
+          orderId: transactionId,
+          description: description || 'Paiement Karangou Studios',
+          callbackUrl: `${callbackUrl}?orderId=${transactionId}`
+        },
+        {
+          headers: {
+            'X-API-Key': apiKey,
+            'X-API-Secret': apiSecret,
+            'Content-Type': 'application/json'
+          }
+        }
+      );
+      
+      return {
+        referenceId: transactionId,
+        status: 'pending',
+        sessionId: paymentResponse.data.sessionId
+      };
+      
+    } catch (error) {
+      console.error('Erreur Flooz API:', error.response?.data || error.message);
+      throw new Error(`Erreur lors de la communication avec Flooz: ${error.message}`);
+    }
+  }
+
+  /**
+   * Traite les callbacks des fournisseurs de paiement
+   * @param {string} provider - Fournisseur de Mobile Money ('mtn', 'moov', 'flooz')
+   * @param {Object} callbackData - Données de callback du fournisseur
+   * @returns {Promise<Object>} - Résultat du traitement
+   */
+  async processCallback(provider, callbackData) {
+    try {
+      let transactionId, status;
+      
+      // Extraire les informations pertinentes selon le fournisseur
+      switch (provider) {
+        case 'mtn':
+          transactionId = callbackData.externalId;
+          status = callbackData.status === 'SUCCESSFUL' ? 'completed' : 
+                  (callbackData.status === 'FAILED' ? 'failed' : 'pending');
+          break;
+          
+        case 'moov':
+          transactionId = callbackData.reference;
+          status = callbackData.status === 'SUCCESS' ? 'completed' : 
+                  (callbackData.status === 'FAILED' ? 'failed' : 'pending');
+          break;
+          
+        case 'flooz':
+          transactionId = callbackData.orderId;
+          status = callbackData.status === '00' ? 'completed' : 'failed';
+          break;
+          
+        default:
+          throw new Error(`Fournisseur non supporté: ${provider}`);
+      }
+      
+      // Mettre à jour la transaction dans la base de données
+      const transaction = await prisma.paymentTransaction.update({
+        where: { transactionId },
+        data: {
+          status,
+          updatedAt: new Date(),
+          errorMessage: status === 'failed' ? (callbackData.reason || 'Paiement échoué') : null
+        }
+      });
+      
+      // Si le paiement est réussi, créer la contribution au projet
+      if (status === 'completed') {
+        await prisma.contribution.create({
+          data: {
+            userId: transaction.userId,
+            projectId: transaction.projectId,
+            amount: transaction.amount,
+            paymentMethod: 'mobile_money',
+            transactionId,
+            status: 'completed',
+            createdAt: new Date()
+          }
+        });
+        
+        // Mettre à jour le montant collecté par le projet
+        await prisma.project.update({
+          where: { id: transaction.projectId },
+          data: {
+            currentAmount: {
+              increment: transaction.amount
+            }
+          }
+        });
+        
+        // Créer une notification pour l'utilisateur
+        await prisma.notification.create({
+          data: {
+            userId: transaction.userId,
+            type: 'contribution',
+            content: `Votre contribution de ${transaction.amount} FCFA a été reçue avec succès.`,
+            relatedId: transaction.projectId,
+            isRead: false,
+            createdAt: new Date()
+          }
+        });
+        
+        // Créer une notification pour le créateur du projet
+        const project = await prisma.project.findUnique({
+          where: { id: transaction.projectId },
+          select: { userId: true, title: true }
+        });
+        
+        if (project) {
+          await prisma.notification.create({
+            data: {
+              userId: project.userId,
+              type: 'contribution',
+              content: `Une nouvelle contribution de ${transaction.amount} FCFA a été reçue pour votre projet "${project.title}".`,
+              relatedId: transaction.projectId,
+              isRead: false,
+              createdAt: new Date()
+            }
+          });
+        }
+      }
+      
+      return {
+        success: true,
+        transactionId,
+        status,
+        message: status === 'completed' ? 'Paiement réussi' : 'Paiement échoué'
+      };
+      
+    } catch (error) {
+      console.error(`Erreur lors du traitement du callback ${provider}:`, error);
+      throw new Error(`Échec du traitement du callback: ${error.message}`);
+    }
+  }
+
+  /**
+   * Vérifie le statut d'une transaction
+   * @param {string} transactionId - ID de la transaction
+   * @returns {Promise<Object>} - Statut de la transaction
+   */
+  async checkTransactionStatus(transactionId) {
+    try {
+      const transaction = await prisma.paymentTransaction.findUnique({
+        where: { transactionId }
+      });
+      
+      if (!transaction) {
+        throw new Error(`Transaction non trouvée: ${transactionId}`);
+      }
+      
+      // Si la transaction est toujours en attente, vérifier auprès du fournisseur
+      if (transaction.status === 'pending') {
+        try {
+          const { provider } = transaction;
+          
+          let providerStatus;
+          switch (provider) {
+            case 'mtn':
+              providerStatus = await this.checkMtnTransactionStatus(transactionId);
+              break;
+            case 'moov':
+              providerStatus = await this.checkMoovTransactionStatus(transactionId);
+              break;
+            case 'flooz':
+              providerStatus = await this.checkFloozTransactionStatus(transactionId);
+              break;
+            default:
+              throw new Error(`Fournisseur non supporté: ${provider}`);
+          }
+          
+          // Mettre à jour le statut si nécessaire
+          if (providerStatus !== 'pending' && providerStatus !== transaction.status) {
+            await this.processCallback(provider, {
+              externalId: transactionId,
+              orderId: transactionId,
+              reference: transactionId,
+              status: providerStatus === 'completed' ? 'SUCCESSFUL' : 'FAILED'
+            });
+            
+            // Récupérer la transaction mise à jour
+            return await prisma.paymentTransaction.findUnique({
+              where: { transactionId }
+            });
+          }
+        } catch (error) {
+          console.error(`Erreur lors de la vérification du statut auprès du fournisseur:`, error);
+          // Continuer et retourner le statut actuel
+        }
+      }
+      
+      return {
+        transactionId,
+        status: transaction.status,
+        amount: transaction.amount,
+        currency: transaction.currency,
+        provider: transaction.provider,
+        createdAt: transaction.createdAt,
+        updatedAt: transaction.updatedAt
+      };
+      
+    } catch (error) {
+      console.error('Erreur lors de la vérification du statut de la transaction:', error);
+      throw new Error(`Échec de la vérification: ${error.message}`);
+    }
+  }
+
+  /**
+   * Vérifie le statut d'une transaction MTN
+   */
+  async checkMtnTransactionStatus(transactionId) {
+    try {
+      const { baseUrl, apiKey, apiSecret } = this.providers.mtn;
+      
+      // Obtenir un token d'accès
+      const tokenResponse = await axios.post(
+        `${baseUrl}/collection/token`,
+        {
+          grant_type: 'client_credentials'
+        },
+        {
+          auth: {
+            username: apiKey,
+            password: apiSecret
+          }
+        }
+      );
+      
+      const accessToken = tokenResponse.data.access_token;
+      
+      // Vérifier le statut de la transaction
+      const statusResponse = await axios.get(
+        `${baseUrl}/collection/v1/requesttopay/${transactionId}`,
+        {
+          headers: {
+            'Authorization': `Bearer ${accessToken}`,
+            'X-Reference-Id': transactionId
+          }
+        }
+      );
+      
+      const status = statusResponse.data.status;
+      
+      if (status === 'SUCCESSFUL') {
+        return 'completed';
+      } else if (status === 'FAILED' || status === 'REJECTED' || status === 'TIMEOUT') {
+        return 'failed';
+      }
+      
+      return 'pending';
+      
+    } catch (error) {
+      console.error('Erreur lors de la vérification MTN:', error.response?.data || error.message);
+      throw error;
+    }
+  }
+
+  /**
+   * Vérifie le statut d'une transaction Moov
+   */
+  async checkMoovTransactionStatus(transactionId) {
+    try {
+      const { baseUrl, apiKey } = this.providers.moov;
+      
+      // Simuler une vérification Moov (adapter selon l'API réelle)
+      const statusResponse = await axios.get(
+        `${baseUrl}/api/v1/payments/${transactionId}`,
+        {
+          headers: {
+            'Authorization': `Bearer ${apiKey}`
+          }
+        }
+      );
+      
+      const status = statusResponse.data.status;
+      
+      if (status === 'SUCCESS') {
+        return 'completed';
+      } else if (status === 'FAILED' || status === 'CANCELLED') {
+        return 'failed';
+      }
+      
+      return 'pending';
+      
+    } catch (error) {
+      console.error('Erreur lors de la vérification Moov:', error.response?.data || error.message);
+      throw error;
+    }
+  }
+
+  /**
+   * Vérifie le statut d'une transaction Flooz
+   */
+  async checkFloozTransactionStatus(transactionId) {
+    try {
+      const { baseUrl, apiKey, apiSecret } = this.providers.flooz;
+      
+      // Simuler une vérification Flooz (adapter selon l'API réelle)
+      const statusResponse = await axios.get(
+        `${baseUrl}/api/merchant/payments/${transactionId}`,
+        {
+          headers: {
+            'X-API-Key': apiKey,
+            'X-API-Secret': apiSecret
+          }
+        }
+      );
+      
+      const status = statusResponse.data.status;
+      
+      if (status === '00') {
+        return 'completed';
+      } else if (['01', '02', '03'].includes(status)) {
+        return 'failed';
+      }
+      
+      return 'pending';
+      
+    } catch (error) {
+      console.error('Erreur lors de la vérification Flooz:', error.response?.data || error.message);
+      throw error;
+    }
+  }
+}
+
+module.exports = new MobileMoneyService();
